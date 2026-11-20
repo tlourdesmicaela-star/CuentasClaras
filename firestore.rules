@@ -1,0 +1,209 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Global Primitives ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && isVerified() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- Entity Validation Blueprints ---
+    function isValidUserPublic(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 120
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 512))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivate(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'email', 'notifyEnabled', 'notifyNewExpense',
+          'notifySettlementReminder', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'email', 'aliasOrCbu', 'accountHolder',
+          'notifyEnabled', 'notifyNewExpense', 'notifySettlementReminder', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && (!('aliasOrCbu' in data) || (data.aliasOrCbu is string && data.aliasOrCbu.size() <= 120))
+        && (!('accountHolder' in data) || (data.accountHolder is string && data.accountHolder.size() <= 120))
+        && data.notifyEnabled is bool
+        && data.notifyNewExpense is bool
+        && data.notifySettlementReminder is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGathering(data, userId, gatheringId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'title', 'date', 'participants',
+          'expenses', 'settledTransferIds', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'date', 'participants',
+          'expenses', 'settledTransferIds', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == gatheringId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 140
+        && data.date is string
+        && data.date.size() == 10
+        && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.participants is list
+        && data.participants.size() <= 30
+        && (data.participants.size() == 0 || data.participants[0] is map)
+        && data.expenses is list
+        && data.expenses.size() <= 100
+        && (data.expenses.size() == 0 || data.expenses[0] is map)
+        && data.settledTransferIds is list
+        && data.settledTransferIds.size() <= 50
+        && (data.settledTransferIds.size() == 0 || data.settledTransferIds[0] is string)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, userId, notificationId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'body', 'type', 'read', 'createdAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'title', 'body', 'type', 'read', 'createdAt'])
+        && data.id is string
+        && data.id == notificationId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 140
+        && data.body is string
+        && data.body.size() >= 1
+        && data.body.size() <= 500
+        && data.type in ['expense', 'settlement', 'system']
+        && data.read is bool
+        && data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserPublic(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserPublic(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && docId == 'profile' && isOwner(userId);
+        allow list: if false;
+        allow create: if isValidId(userId)
+          && docId == 'profile'
+          && isOwner(userId)
+          && isValidUserPrivate(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && docId == 'profile'
+          && isOwner(userId)
+          && isValidUserPrivate(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'email', 'aliasOrCbu', 'accountHolder',
+            'notifyEnabled', 'notifyNewExpense', 'notifySettlementReminder', 'updatedAt'
+          ]);
+        allow delete: if false;
+      }
+
+      match /gatherings/{gatheringId} {
+        allow get: if isValidId(userId) && isValidId(gatheringId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(gatheringId)
+          && isOwner(userId)
+          && isValidGathering(incoming(), userId, gatheringId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(gatheringId)
+          && isOwner(userId)
+          && isValidGathering(incoming(), userId, gatheringId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'date', 'participants', 'expenses', 'settledTransferIds', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(gatheringId) && isOwner(userId);
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(notificationId)
+          && isOwner(userId)
+          && isValidNotification(incoming(), userId, notificationId)
+          && incoming().createdAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(notificationId)
+          && isOwner(userId)
+          && isValidNotification(incoming(), userId, notificationId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+        allow delete: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+      }
+    }
+  }
+}

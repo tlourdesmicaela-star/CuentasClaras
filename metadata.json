@@ -1,0 +1,6 @@
+{
+  "name": "CuentasClaras",
+  "description": "Dividí gastos de juntadas, asados y cenas al instante con dictado por voz, escáner QR y tickets, liquidación mínima y resumen para WhatsApp.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

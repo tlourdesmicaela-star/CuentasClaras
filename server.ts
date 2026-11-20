@@ -1,0 +1,1173 @@
+import express from 'express';
+import fs from 'fs';
+import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import { GoogleGenAI, Type } from '@google/genai';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = 3000;
+
+const SAMPLE_RECEIPT_PATHS: Record<string, string> = {
+  asado: 'src/assets/images/sample_receipt_asado_1795185295798.jpg',
+  pizzeria: 'src/assets/images/sample_receipt_pizzeria_1795185293520.jpg',
+};
+
+type LangCode = 'es' | 'en' | 'fr' | 'zh' | 'ru';
+
+function resolveLanguage(input?: unknown): LangCode {
+  if (input === 'en' || input === 'fr' || input === 'zh' || input === 'ru') {
+    return input;
+  }
+  return 'es';
+}
+
+const MAPS_LANG_BY_CODE: Record<LangCode, string> = {
+  es: 'es',
+  en: 'en',
+  fr: 'fr',
+  zh: 'zh-CN',
+  ru: 'ru',
+};
+
+const PROMPT_LANG_LABEL: Record<LangCode, string> = {
+  es: 'español (natural y claro)',
+  en: 'English',
+  fr: 'French (français)',
+  zh: 'Simplified Chinese (简体中文)',
+  ru: 'Russian (русский язык)',
+};
+
+const SERVER_ERRORS: Record<
+  LangCode,
+  {
+    geminiMissingParse: string;
+    missingExpenseText: string;
+    geminiMissingOcr: string;
+    sampleNotFound: string;
+    missingImage: string;
+    mapsKeyMissing: string;
+    missingLocation: string;
+    mapsQuotaExceeded: string;
+    nearbyFallbackError: string;
+    geminiMissingOffers: string;
+    geminiInvalidKey: string;
+    geminiBusy: string;
+    geminiGeneric: string;
+    defaultArea: string;
+    defaultStoreName: string;
+  }
+> = {
+  es: {
+    geminiMissingParse:
+      'No se encontró GEMINI_API_KEY configurada en el servidor. Configurala en Settings > Secrets o usá el motor local JS.',
+    missingExpenseText: 'Ingresá una descripción de gasto para analizar.',
+    geminiMissingOcr:
+      'No se encontró GEMINI_API_KEY configurada en el servidor para ejecutar OCR con Gemini Vision.',
+    sampleNotFound: 'No se encontró la imagen del ticket de ejemplo.',
+    missingImage: 'Falta la imagen del ticket o QR para escanear.',
+    mapsKeyMissing: 'Falta configurar GOOGLE_MAPS_API_KEY en el servidor.',
+    missingLocation: 'Activá el GPS o ingresá tu ciudad para buscar lugares cercanos.',
+    mapsQuotaExceeded: 'Se alcanzó el límite de consultas de Google Maps Platform.',
+    nearbyFallbackError: 'No se pudieron consultar comercios cercanos en este momento.',
+    geminiMissingOffers:
+      'No se encontró GEMINI_API_KEY configurada en el servidor para buscar ofertas en la web.',
+    geminiInvalidKey:
+      'La clave de API de Gemini no es válida o no tiene permisos. Verificá Settings > Secrets.',
+    geminiBusy:
+      'El servicio de IA está con alta demanda temporal. Intentá nuevamente en unos segundos.',
+    geminiGeneric: 'Error al procesar con el servicio de IA.',
+    defaultArea: 'Tu zona actual',
+    defaultStoreName: 'Comercio local',
+  },
+  en: {
+    geminiMissingParse:
+      'GEMINI_API_KEY is not configured on the server. Set it in Settings > Secrets or use the local JS parser.',
+    missingExpenseText: 'Please enter an expense description to analyze.',
+    geminiMissingOcr:
+      'GEMINI_API_KEY is not configured on the server to run Gemini Vision OCR.',
+    sampleNotFound: 'Sample receipt image could not be found.',
+    missingImage: 'Missing receipt or QR image to scan.',
+    mapsKeyMissing: 'GOOGLE_MAPS_API_KEY is not configured on the server.',
+    missingLocation: 'Enable GPS or enter your city to search for nearby places.',
+    mapsQuotaExceeded: 'Google Maps Platform query quota limit reached.',
+    nearbyFallbackError: 'Could not query nearby places at this moment.',
+    geminiMissingOffers:
+      'GEMINI_API_KEY is not configured on the server to search web deals.',
+    geminiInvalidKey:
+      'The Gemini API key is invalid or lacks permissions. Check Settings > Secrets.',
+    geminiBusy:
+      'The AI service is experiencing temporary high demand. Try again in a few seconds.',
+    geminiGeneric: 'Error processing request with the AI service.',
+    defaultArea: 'Your current area',
+    defaultStoreName: 'Local venue',
+  },
+  fr: {
+    geminiMissingParse:
+      'GEMINI_API_KEY introuvable sur le serveur. Configurez-la dans Settings > Secrets ou utilisez le moteur JS local.',
+    missingExpenseText: 'Veuillez saisir une description de dépense à analyser.',
+    geminiMissingOcr:
+      'GEMINI_API_KEY introuvable sur le serveur pour exécuter l’OCR Gemini Vision.',
+    sampleNotFound: 'L’image du ticket d’exemple est introuvable.',
+    missingImage: 'Image du ticket ou du QR manquante pour la numérisation.',
+    mapsKeyMissing: 'GOOGLE_MAPS_API_KEY n’est pas configurée sur le serveur.',
+    missingLocation: 'Activez le GPS ou saisissez votre ville pour rechercher des lieux à proximité.',
+    mapsQuotaExceeded: 'Limite de requêtes Google Maps Platform atteinte.',
+    nearbyFallbackError: 'Impossible de consulter les lieux à proximité pour le moment.',
+    geminiMissingOffers:
+      'GEMINI_API_KEY introuvable sur le serveur pour rechercher les offres en ligne.',
+    geminiInvalidKey:
+      'La clé API Gemini est invalide ou n’a pas les autorisations requises. Vérifiez Settings > Secrets.',
+    geminiBusy:
+      'Le service d’IA connaît une forte demande temporaire. Réessayez dans quelques secondes.',
+    geminiGeneric: 'Erreur lors du traitement avec le service d’IA.',
+    defaultArea: 'Votre zone actuelle',
+    defaultStoreName: 'Commerce local',
+  },
+  zh: {
+    geminiMissingParse:
+      '服务器未配置 GEMINI_API_KEY。请在 Settings > Secrets 中设置，或使用本地 JS 解析器。',
+    missingExpenseText: '请输入要解析的消费说明。',
+    geminiMissingOcr: '服务器未配置 GEMINI_API_KEY，无法运行 Gemini Vision OCR。',
+    sampleNotFound: '未找到示例小票图片。',
+    missingImage: '缺少要扫描的小票或二维码图片。',
+    mapsKeyMissing: '服务器未配置 GOOGLE_MAPS_API_KEY。',
+    missingLocation: '请开启 GPS 或输入所在城市以搜索附近地点。',
+    mapsQuotaExceeded: '已达到 Google Maps Platform 查询配额上限。',
+    nearbyFallbackError: '暂时无法查询附近商家。',
+    geminiMissingOffers: '服务器未配置 GEMINI_API_KEY，无法联网搜索优惠。',
+    geminiInvalidKey: 'Gemini API 密钥无效或权限不足。请检查 Settings > Secrets。',
+    geminiBusy: 'AI 服务当前请求繁忙，请几秒后再试。',
+    geminiGeneric: 'AI 服务处理请求时出错。',
+    defaultArea: '当前区域',
+    defaultStoreName: '本地商家',
+  },
+  ru: {
+    geminiMissingParse:
+      'На сервере не настроен GEMINI_API_KEY. Укажите его в Settings > Secrets или используйте локальный JS-парсер.',
+    missingExpenseText: 'Введите описание расхода для анализа.',
+    geminiMissingOcr:
+      'На сервере не настроен GEMINI_API_KEY для запуска OCR Gemini Vision.',
+    sampleNotFound: 'Не удалось найти изображение примера чека.',
+    missingImage: 'Отсутствует изображение чека или QR-кода для сканирования.',
+    mapsKeyMissing: 'На сервере не настроен GOOGLE_MAPS_API_KEY.',
+    missingLocation: 'Включите GPS или введите ваш город для поиска мест поблизости.',
+    mapsQuotaExceeded: 'Достигнут лимит запросов Google Maps Platform.',
+    nearbyFallbackError: 'Не удалось получить список мест поблизости.',
+    geminiMissingOffers:
+      'На сервере не настроен GEMINI_API_KEY для поиска акций в интернете.',
+    geminiInvalidKey:
+      'Ключ Gemini API недействителен или не имеет прав. Проверьте Settings > Secrets.',
+    geminiBusy: 'Сервис ИИ временно перегружен. Повторите попытку через несколько секунд.',
+    geminiGeneric: 'Ошибка обработки запроса сервисом ИИ.',
+    defaultArea: 'Ваш район',
+    defaultStoreName: 'Местное заведение',
+  },
+};
+
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    return null;
+  }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+function getMapsApiKey(): string | null {
+  const key = process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY;
+  if (!key || key === 'MY_GOOGLE_MAPS_API_KEY') {
+    return null;
+  }
+  return key;
+}
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+interface AddressComponentLike {
+  long_name?: string;
+  longText?: string;
+  types?: string[];
+}
+
+function extractCityFromComponents(components?: AddressComponentLike[]): string {
+  if (!Array.isArray(components)) return '';
+  const findType = (type: string) => {
+    const match = components.find((c) => Array.isArray(c.types) && c.types.includes(type));
+    return match?.longText || match?.long_name || '';
+  };
+  const locality =
+    findType('locality') ||
+    findType('sublocality_level_1') ||
+    findType('administrative_area_level_2');
+  const province = findType('administrative_area_level_1');
+  if (locality && province && locality.toLowerCase() !== province.toLowerCase()) {
+    return `${locality}, ${province}`;
+  }
+  return locality || province || '';
+}
+
+function resolveReceiptFile(relativePath: string): string | null {
+  const candidates = [
+    path.resolve(__dirname, relativePath),
+    path.resolve(__dirname, 'dist', relativePath),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function mapGeminiError(error: unknown, lang: LangCode = 'es'): { status: number; message: string } {
+  const errMsgs = SERVER_ERRORS[lang];
+  const errObj = error as { status?: number; message?: string };
+  const msg = errObj?.message || errMsgs.geminiGeneric;
+  if (msg.includes('API_KEY_INVALID') || msg.includes('PERMISSION_DENIED') || errObj?.status === 403) {
+    return {
+      status: 403,
+      message: errMsgs.geminiInvalidKey,
+    };
+  }
+  if (
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('high demand') ||
+    errObj?.status === 429 ||
+    errObj?.status === 503
+  ) {
+    return {
+      status: 503,
+      message: errMsgs.geminiBusy,
+    };
+  }
+  return {
+    status: 500,
+    message: msg,
+  };
+}
+
+async function startServer() {
+  const app = express();
+  const httpServer = http.createServer(app);
+  app.use(express.json({ limit: '12mb' }));
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  app.post('/api/parse-expense', async (req, res) => {
+    const { text, participants, language } = req.body as {
+      text?: string;
+      participants?: string[];
+      language?: string;
+    };
+    const lang = resolveLanguage(language);
+    const errMsgs = SERVER_ERRORS[lang];
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: errMsgs.geminiMissingParse,
+      });
+      return;
+    }
+
+    if (!text || !text.trim()) {
+      res.status(400).json({ error: errMsgs.missingExpenseText });
+      return;
+    }
+
+    const activeParticipants = Array.isArray(participants) ? participants.filter(Boolean) : [];
+    const outputLangName = PROMPT_LANG_LABEL[lang];
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `User input: "${text.trim()}"\nCurrent group participants: ${
+                  activeParticipants.length > 0 ? activeParticipants.join(', ') : 'None yet'
+                }`,
+              },
+            ],
+          },
+        ],
+        config: {
+          systemInstruction: `Eres un asistente contable experto en dividir gastos de juntadas, cenas y viajes (en cualquier idioma: español, inglés, francés, chino o ruso).
+Extraé todos los gastos mencionados en el texto.
+Reglas estrictas:
+1. Normalizá los nombres propios con mayúscula inicial (ej: "santi" -> "Santi"). Si coinciden con un nombre de los "Current group participants", usá exactamente ese nombre.
+2. Si el texto menciona nuevos nombres que no estaban en la lista, incluilos en "newParticipants".
+3. Cada gasto debe tener:
+   - description: descripción corta y clara en ${outputLangName} (manteniendo los nombres de ítems claros).
+   - amount: monto total numérico positivo (sin signos $ ni separadores de miles).
+   - category: EXACTAMENTE uno de los valores internos: "comida", "bebida", "transporte", "otros".
+   - payers: lista de { name, amount } con cuánto puso cada persona. Si una sola persona pagó todo, poné un solo elemento con el monto total. Si hubo pago parcial (ej: "Marcos puso 45000 y Sofía 25500"), detallá ambos montos de modo que sumen el total del gasto. Si no se aclara quién pagó, usá el primer participante del grupo o "Pagador".
+   - excludedParticipants: nombres de personas explícitamente excluidas de ese gasto (ej: "Sofía y Lucía no toman alcohol" -> ["Sofía", "Lucía"]).
+4. Si en una misma oración se dice "Cena $70.500: Marcos pagó $45.000 y Sofía $25.500. Juli no come pizza ($14.800) y Lucas no tomó cerveza ($13.500)", desglosá inteligentemente los ítems con sus exclusiones y mantené la proporción o asigná el monto pagado correctamente para que la suma de gastos refleje exactamente lo pagado.
+5. Devolvé una nota breve en "note" resumiendo lo interpretado en ${outputLangName}.`,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              newParticipants: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              expenses: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    description: { type: Type.STRING },
+                    amount: { type: Type.NUMBER },
+                    category: { type: Type.STRING },
+                    payers: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          name: { type: Type.STRING },
+                          amount: { type: Type.NUMBER },
+                        },
+                        required: ['name', 'amount'],
+                      },
+                    },
+                    excludedParticipants: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                    },
+                  },
+                  required: ['description', 'amount', 'category', 'payers', 'excludedParticipants'],
+                },
+              },
+              note: { type: Type.STRING },
+            },
+            required: ['newParticipants', 'expenses', 'note'],
+          },
+        },
+      });
+
+      const raw = (response.text ?? '{}').trim();
+      const parsed = JSON.parse(raw);
+      res.json(parsed);
+    } catch (error) {
+      const mapped = mapGeminiError(error, lang);
+      res.status(mapped.status).json({ error: mapped.message });
+    }
+  });
+
+  app.post('/api/scan-receipt', async (req, res) => {
+    const { imageBase64, mimeType, sampleKey, qrRawText, language } = req.body as {
+      imageBase64?: string;
+      mimeType?: string;
+      sampleKey?: string;
+      qrRawText?: string;
+      language?: string;
+    };
+    const lang = resolveLanguage(language);
+    const errMsgs = SERVER_ERRORS[lang];
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: errMsgs.geminiMissingOcr,
+      });
+      return;
+    }
+
+    let finalBase64 = imageBase64;
+    let finalMimeType = mimeType || 'image/jpeg';
+
+    if (sampleKey && SAMPLE_RECEIPT_PATHS[sampleKey]) {
+      const resolved = resolveReceiptFile(SAMPLE_RECEIPT_PATHS[sampleKey]);
+      if (!resolved) {
+        res.status(404).json({ error: errMsgs.sampleNotFound });
+        return;
+      }
+      const fileBuffer = fs.readFileSync(resolved);
+      finalBase64 = fileBuffer.toString('base64');
+      finalMimeType = 'image/jpeg';
+    }
+
+    if (!finalBase64) {
+      res.status(400).json({ error: errMsgs.missingImage });
+      return;
+    }
+
+    try {
+      const outputLangName = PROMPT_LANG_LABEL[lang];
+      const qrContext = qrRawText
+        ? `\nDecoded QR text detected: "${qrRawText}". If it is an AFIP/tax invoice QR or a payment/receipt QR, also use those details to extract merchant name, date, and total.`
+        : '';
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: finalMimeType,
+                data: finalBase64,
+              },
+            },
+            {
+              text: `Read this receipt, invoice, or purchase/restaurant QR code and extract the merchant name, date (if visible), full list of line items with quantity and line total price (do NOT include subtotal, tax-included, or grand total rows as items), and the receipt total. If the image only contains a QR code with a total/merchant and no item list, return one item with a clear concept in ${outputLangName} and the detected total. Keep category strictly as one of: "comida", "bebida", "transporte", "otros". Watch out for Latin American/European number formats where dots separate thousands (e.g., $38.500,00 is 38500).${qrContext}`,
+            },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              merchantName: { type: Type.STRING },
+              date: { type: Type.STRING },
+              detectedTotal: { type: Type.NUMBER },
+              items: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    quantity: { type: Type.INTEGER },
+                    totalPrice: { type: Type.NUMBER },
+                    category: { type: Type.STRING },
+                  },
+                  required: ['name', 'quantity', 'totalPrice', 'category'],
+                },
+              },
+            },
+            required: ['merchantName', 'date', 'detectedTotal', 'items'],
+          },
+        },
+      });
+
+      const raw = (response.text ?? '{}').trim();
+      const parsed = JSON.parse(raw);
+      res.json(parsed);
+    } catch (error) {
+      const mapped = mapGeminiError(error, lang);
+      res.status(mapped.status).json({ error: mapped.message });
+    }
+  });
+
+  app.get('/api/maps-config', (_req, res) => {
+    res.json({
+      apiKey: getMapsApiKey() || '',
+    });
+  });
+
+  app.post('/api/nearby-stores', async (req, res) => {
+    const {
+      lat,
+      lng,
+      cityQuery,
+      mode = 'all',
+      storeType = 'all',
+      productCategory = 'all',
+      openNowOnly = false,
+      language,
+    } = req.body as {
+      lat?: number;
+      lng?: number;
+      cityQuery?: string;
+      mode?: 'all' | 'salidas' | 'compras';
+      storeType?:
+        | 'all'
+        | 'carniceria'
+        | 'panaderia'
+        | 'supermercado'
+        | 'heladeria'
+        | 'restaurante'
+        | 'restobar'
+        | 'juegos_comida';
+      productCategory?: 'all' | 'carnes' | 'refrescos' | 'helados' | 'panificados';
+      openNowOnly?: boolean;
+      language?: string;
+    };
+
+    const lang = resolveLanguage(language);
+    const errMsgs = SERVER_ERRORS[lang];
+    const mapsLang = MAPS_LANG_BY_CODE[lang];
+
+    const mapsKey = getMapsApiKey();
+    if (!mapsKey) {
+      res.status(503).json({
+        error: errMsgs.mapsKeyMissing,
+      });
+      return;
+    }
+
+    const hasCoords = typeof lat === 'number' && Number.isFinite(lat) && typeof lng === 'number' && Number.isFinite(lng);
+    const trimmedCity = (cityQuery || '').trim();
+
+    if (!hasCoords && !trimmedCity) {
+      res.status(400).json({
+        error: errMsgs.missingLocation,
+      });
+      return;
+    }
+
+    let centerCoords: { lat: number; lng: number } | null = hasCoords ? { lat: lat!, lng: lng! } : null;
+    let resolvedCity = trimmedCity;
+
+    try {
+      // Reverse or forward geocode to identify city & center coordinates
+      const geocodeUrl = hasCoords
+        ? `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`
+        : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(trimmedCity)}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
+
+      const geoRes = await fetch(geocodeUrl);
+      if (geoRes.status === 429) {
+        res.status(429).json({
+          error: errMsgs.mapsQuotaExceeded,
+          quotaExceeded: true,
+        });
+        return;
+      }
+      if (geoRes.ok) {
+        const geoData = (await geoRes.json()) as {
+          status?: string;
+          results?: Array<{
+            geometry?: { location?: { lat: number; lng: number } };
+            address_components?: AddressComponentLike[];
+            formatted_address?: string;
+          }>;
+        };
+        if (geoData.status === 'OVER_QUERY_LIMIT') {
+          res.status(429).json({
+            error: errMsgs.mapsQuotaExceeded,
+            quotaExceeded: true,
+          });
+          return;
+        }
+        const first = geoData.results?.[0];
+        if (first) {
+          const detected = extractCityFromComponents(first.address_components);
+          if (detected) resolvedCity = detected;
+          if (!centerCoords && first.geometry?.location) {
+            centerCoords = {
+              lat: first.geometry.location.lat,
+              lng: first.geometry.location.lng,
+            };
+          }
+        }
+      }
+    } catch {
+      // Continue cleanly to Places Text Search even if Geocoding is unavailable
+    }
+
+    type StoreBucketKey =
+      | 'carniceria'
+      | 'panaderia'
+      | 'supermercado'
+      | 'heladeria'
+      | 'restaurante'
+      | 'restobar'
+      | 'juegos_comida';
+
+    const STORE_LABELS_BY_LANG: Record<LangCode, Record<StoreBucketKey, string>> = {
+      es: {
+        restaurante: 'Restaurante',
+        restobar: 'Restobar',
+        juegos_comida: 'Juegos y comidas',
+        carniceria: 'Carnicería',
+        panaderia: 'Panadería',
+        supermercado: 'Supermercado',
+        heladeria: 'Heladería',
+      },
+      en: {
+        restaurante: 'Restaurant',
+        restobar: 'Gastropub / Bar',
+        juegos_comida: 'Games & Dining',
+        carniceria: 'Butcher Shop',
+        panaderia: 'Bakery',
+        supermercado: 'Supermarket',
+        heladeria: 'Ice Cream Shop',
+      },
+      fr: {
+        restaurante: 'Restaurant',
+        restobar: 'Resto-bar',
+        juegos_comida: 'Jeux & restauration',
+        carniceria: 'Boucherie',
+        panaderia: 'Boulangerie',
+        supermercado: 'Supermarché',
+        heladeria: 'Glacier',
+      },
+      zh: {
+        restaurante: '餐厅',
+        restobar: '餐酒吧',
+        juegos_comida: '游乐与餐饮',
+        carniceria: '肉铺',
+        panaderia: '面包店',
+        supermercado: '超市',
+        heladeria: '冰淇淋店',
+      },
+      ru: {
+        restaurante: 'Ресторан',
+        restobar: 'Рестобар',
+        juegos_comida: 'Игры и еда',
+        carniceria: 'Мясная лавка',
+        panaderia: 'Пекарня',
+        supermercado: 'Супермаркет',
+        heladeria: 'Кафе-мороженое',
+      },
+    };
+
+    const STORE_QUERIES: Record<StoreBucketKey, { label: string; query: string }> = {
+      restaurante: { label: STORE_LABELS_BY_LANG[lang].restaurante, query: 'restaurant dining food' },
+      restobar: { label: STORE_LABELS_BY_LANG[lang].restobar, query: 'restobar gastropub bar burgers beer' },
+      juegos_comida: { label: STORE_LABELS_BY_LANG[lang].juegos_comida, query: 'pool hall bowling arcade bar food games' },
+      carniceria: { label: STORE_LABELS_BY_LANG[lang].carniceria, query: 'butcher shop meat cuts carniceria' },
+      panaderia: { label: STORE_LABELS_BY_LANG[lang].panaderia, query: 'bakery bread pastries panaderia' },
+      supermercado: { label: STORE_LABELS_BY_LANG[lang].supermercado, query: 'supermarket grocery drinks' },
+      heladeria: { label: STORE_LABELS_BY_LANG[lang].heladeria, query: 'ice cream shop heladeria' },
+    };
+
+    let bucketsToSearch: StoreBucketKey[];
+    if (storeType !== 'all' && storeType in STORE_QUERIES) {
+      bucketsToSearch = [storeType];
+    } else if (mode === 'salidas') {
+      bucketsToSearch = ['restaurante', 'restobar', 'juegos_comida'];
+    } else if (productCategory === 'carnes') {
+      bucketsToSearch = ['carniceria', 'supermercado'];
+    } else if (productCategory === 'panificados') {
+      bucketsToSearch = ['panaderia', 'supermercado'];
+    } else if (productCategory === 'helados') {
+      bucketsToSearch = ['heladeria', 'supermercado'];
+    } else if (productCategory === 'refrescos') {
+      bucketsToSearch = ['supermercado'];
+    } else if (mode === 'compras') {
+      bucketsToSearch = ['carniceria', 'panaderia', 'supermercado', 'heladeria'];
+    } else {
+      bucketsToSearch = ['restaurante', 'restobar', 'juegos_comida', 'carniceria', 'supermercado'];
+    }
+
+    const fieldMask = [
+      'places.id',
+      'places.displayName',
+      'places.formattedAddress',
+      'places.shortFormattedAddress',
+      'places.location',
+      'places.googleMapsUri',
+      'places.primaryType',
+      'places.primaryTypeDisplayName',
+      'places.rating',
+      'places.userRatingCount',
+      'places.currentOpeningHours.openNow',
+      'places.priceLevel',
+      'places.priceRange',
+      'places.websiteUri',
+      'places.addressComponents',
+    ].join(',');
+
+    interface RawPlace {
+      id: string;
+      displayName?: { text?: string };
+      formattedAddress?: string;
+      shortFormattedAddress?: string;
+      location?: { latitude: number; longitude: number };
+      googleMapsUri?: string;
+      primaryType?: string;
+      primaryTypeDisplayName?: { text?: string };
+      rating?: number;
+      userRatingCount?: number;
+      currentOpeningHours?: { openNow?: boolean };
+      priceLevel?: string;
+      priceRange?: {
+        startPrice?: { currencyCode?: string; units?: string };
+        endPrice?: { currencyCode?: string; units?: string };
+      };
+      websiteUri?: string;
+      addressComponents?: AddressComponentLike[];
+    }
+
+    const PRICE_LEVEL_BY_LANG: Record<LangCode, Record<string, string>> = {
+      es: {
+        PRICE_LEVEL_FREE: 'Gratis',
+        PRICE_LEVEL_INEXPENSIVE: '$ Económico',
+        PRICE_LEVEL_MODERATE: '$$ Moderado',
+        PRICE_LEVEL_EXPENSIVE: '$$$ Elevado',
+        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+      },
+      en: {
+        PRICE_LEVEL_FREE: 'Free',
+        PRICE_LEVEL_INEXPENSIVE: '$ Inexpensive',
+        PRICE_LEVEL_MODERATE: '$$ Moderate',
+        PRICE_LEVEL_EXPENSIVE: '$$$ Expensive',
+        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+      },
+      fr: {
+        PRICE_LEVEL_FREE: 'Gratuit',
+        PRICE_LEVEL_INEXPENSIVE: '$ Abordable',
+        PRICE_LEVEL_MODERATE: '$$ Modéré',
+        PRICE_LEVEL_EXPENSIVE: '$$$ Élevé',
+        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+      },
+      zh: {
+        PRICE_LEVEL_FREE: '免费',
+        PRICE_LEVEL_INEXPENSIVE: '$ 实惠',
+        PRICE_LEVEL_MODERATE: '$$ 适中',
+        PRICE_LEVEL_EXPENSIVE: '$$$ 偏高',
+        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ 高端',
+      },
+      ru: {
+        PRICE_LEVEL_FREE: 'Бесплатно',
+        PRICE_LEVEL_INEXPENSIVE: '$ Недорого',
+        PRICE_LEVEL_MODERATE: '$$ Умеренно',
+        PRICE_LEVEL_EXPENSIVE: '$$$ Дорого',
+        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Премиум',
+      },
+    };
+    const PRICE_LEVEL_LABELS = PRICE_LEVEL_BY_LANG[lang];
+
+    try {
+      const searchPromises = bucketsToSearch.map(async (bucket) => {
+        const meta = STORE_QUERIES[bucket];
+        const queryText =
+          (!centerCoords || !hasCoords) && resolvedCity
+            ? `${meta.query} ${resolvedCity}`
+            : meta.query;
+
+        const body: Record<string, unknown> = {
+          textQuery: queryText,
+          languageCode: mapsLang,
+          pageSize: bucketsToSearch.length === 1 ? 10 : 4,
+        };
+
+        if (openNowOnly) {
+          body.openNow = true;
+        }
+
+        if (centerCoords) {
+          body.locationBias = {
+            circle: {
+              center: {
+                latitude: centerCoords.lat,
+                longitude: centerCoords.lng,
+              },
+              radius: 7500.0,
+            },
+          };
+        }
+
+        const placesRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': mapsKey,
+            'X-Goog-FieldMask': fieldMask,
+            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+          },
+          body: JSON.stringify(body),
+        });
+
+        const data = (await placesRes.json()) as {
+          places?: RawPlace[];
+          error?: { status?: string; message?: string };
+        };
+
+        if (placesRes.status === 429 || data.error?.status === 'RESOURCE_EXHAUSTED') {
+          throw { quotaExceeded: true, message: data.error?.message || 'Quota exceeded' };
+        }
+
+        if (!placesRes.ok) {
+          throw new Error(data.error?.message || `Places API HTTP ${placesRes.status}`);
+        }
+
+        return (data.places || []).map((place) => ({
+          bucket,
+          bucketLabel: meta.label,
+          place,
+        }));
+      });
+
+      const nested = await Promise.all(searchPromises);
+      const flat = nested.flat();
+
+      // Fallback city detection from first Place addressComponents if Geocoding didn't yield one
+      if (!resolvedCity && flat.length > 0) {
+        for (const entry of flat) {
+          const fromPlace = extractCityFromComponents(entry.place.addressComponents);
+          if (fromPlace) {
+            resolvedCity = fromPlace;
+            break;
+          }
+        }
+      }
+
+      const seenIds = new Set<string>();
+      const normalizedPlaces = flat
+        .filter(({ place }) => {
+          if (!place.id || seenIds.has(place.id)) return false;
+          seenIds.add(place.id);
+          return true;
+        })
+        .map(({ bucket, bucketLabel, place }) => {
+          const pLat = place.location?.latitude;
+          const pLng = place.location?.longitude;
+          const distanceMeters =
+            centerCoords && typeof pLat === 'number' && typeof pLng === 'number'
+              ? haversineMeters(centerCoords.lat, centerCoords.lng, pLat, pLng)
+              : null;
+
+          if (!centerCoords && typeof pLat === 'number' && typeof pLng === 'number') {
+            centerCoords = { lat: pLat, lng: pLng };
+          }
+
+          const startUnits = place.priceRange?.startPrice?.units
+            ? Number(place.priceRange.startPrice.units)
+            : null;
+          const endUnits = place.priceRange?.endPrice?.units
+            ? Number(place.priceRange.endPrice.units)
+            : null;
+
+          return {
+            id: place.id,
+            name: place.displayName?.text || errMsgs.defaultStoreName,
+            storeType: bucket,
+            storeTypeLabel: place.primaryTypeDisplayName?.text || bucketLabel,
+            address: place.shortFormattedAddress || place.formattedAddress || '',
+            lat: pLat ?? null,
+            lng: pLng ?? null,
+            distanceMeters,
+            rating: place.rating ?? null,
+            userRatingCount: place.userRatingCount ?? null,
+            openNow: place.currentOpeningHours?.openNow ?? null,
+            priceLevelLabel: place.priceLevel ? PRICE_LEVEL_LABELS[place.priceLevel] || null : null,
+            priceRange:
+              startUnits !== null || endUnits !== null
+                ? {
+                    currencyCode:
+                      place.priceRange?.startPrice?.currencyCode ||
+                      place.priceRange?.endPrice?.currencyCode ||
+                      'ARS',
+                    startUnits: Number.isFinite(startUnits) ? startUnits : null,
+                    endUnits: Number.isFinite(endUnits) ? endUnits : null,
+                  }
+                : null,
+            googleMapsUri:
+              place.googleMapsUri ||
+              (typeof pLat === 'number' && typeof pLng === 'number'
+                ? `https://www.google.com/maps/search/?api=1&query=${pLat},${pLng}&query_place_id=${encodeURIComponent(place.id)}`
+                : ''),
+            websiteUri: place.websiteUri || null,
+          };
+        })
+        .sort((a, b) => {
+          if (a.distanceMeters !== null && b.distanceMeters !== null) {
+            return a.distanceMeters - b.distanceMeters;
+          }
+          return (b.rating || 0) - (a.rating || 0);
+        });
+
+      res.json({
+        city: resolvedCity || errMsgs.defaultArea,
+        center: centerCoords,
+        places: normalizedPlaces,
+      });
+    } catch (error) {
+      const errObj = error as { quotaExceeded?: boolean; message?: string };
+      if (errObj?.quotaExceeded) {
+        res.status(429).json({
+          error: errMsgs.mapsQuotaExceeded,
+          quotaExceeded: true,
+        });
+        return;
+      }
+      res.status(500).json({
+        error: errObj?.message || errMsgs.nearbyFallbackError,
+      });
+    }
+  });
+
+  app.post('/api/search-offers', async (req, res) => {
+    const {
+      city,
+      mode = 'all',
+      productCategory = 'all',
+      storeType = 'all',
+      customQuery = '',
+      nearbyStoreNames = [],
+      venues = [],
+      language,
+    } = req.body as {
+      city?: string;
+      mode?: 'all' | 'salidas' | 'compras';
+      productCategory?: 'all' | 'carnes' | 'refrescos' | 'helados' | 'panificados';
+      storeType?:
+        | 'all'
+        | 'carniceria'
+        | 'panaderia'
+        | 'supermercado'
+        | 'heladeria'
+        | 'restaurante'
+        | 'restobar'
+        | 'juegos_comida';
+      customQuery?: string;
+      nearbyStoreNames?: string[];
+      venues?: Array<{ id: string; name: string; storeType: string; address?: string }>;
+      language?: string;
+    };
+
+    const lang = resolveLanguage(language);
+    const errMsgs = SERVER_ERRORS[lang];
+    const outputLangName = PROMPT_LANG_LABEL[lang];
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: errMsgs.geminiMissingOffers,
+      });
+      return;
+    }
+
+    const targetCity = (city || '').trim() || 'Argentina';
+
+    const PRODUCT_LABELS: Record<string, string> = {
+      all: 'meat cuts for barbecue/grill, soft drinks/sodas, ice cream, and bread/pastries',
+      carnes: 'meat cuts (steak, ribs, sausages, grill cuts)',
+      refrescos: 'soft drinks, sodas, flavored water, and beverages',
+      helados: 'ice cream tubs, per-kilo offers, and 2-for-1 ice cream promotions',
+      panificados: 'bakery bread, artisan loaves, pastries, and burger/sandwich buns',
+    };
+
+    const STORE_LABELS: Record<string, string> = {
+      all:
+        mode === 'salidas'
+          ? 'restaurants, restobars, gastropubs, game bars (pool, bowling, arcade) and group dining venues'
+          : 'butcher shops, bakeries, supermarkets, ice cream shops, restaurants, and game bars',
+      restaurante: 'restaurants, steakhouses, and group dining venues',
+      restobar: 'restobars, gastropubs, burger bars, craft beer & happy hour spots',
+      juegos_comida: 'pool halls, bowling alleys, arcade bars, and game + dining venues for groups',
+      carniceria: 'butcher shops and meat markets',
+      panaderia: 'bakeries and pastry shops',
+      supermercado: 'supermarkets and wholesalers',
+      heladeria: 'ice cream shops',
+    };
+
+    const venueList = Array.isArray(venues) && venues.length > 0
+      ? venues.slice(0, 10)
+      : (Array.isArray(nearbyStoreNames) ? nearbyStoreNames.slice(0, 8) : []).map((name, idx) => ({
+          id: `v-${idx}`,
+          name,
+          storeType,
+          address: '',
+        }));
+
+    const venueListText =
+      venueList.length > 0
+        ? `\nReal venues detected in ${targetCity}:\n${venueList
+            .map((v) => `- ${v.name} (${v.storeType}${v.address ? `, ${v.address}` : ''})`)
+            .join('\n')}`
+        : '';
+
+    const userFilter = customQuery.trim() ? `\nSpecific user search filter: "${customQuery.trim()}".` : '';
+
+    const isSalidasFocus =
+      mode === 'salidas' ||
+      storeType === 'restaurante' ||
+      storeType === 'restobar' ||
+      storeType === 'juegos_comida';
+
+    const offerPrompt = isSalidasFocus
+      ? `Search the web for current information in ${targetCity} about dining deals (daily menus, happy hour, 2-for-1 deals, bank or digital wallet discounts) and food or game prices (e.g., per-hour/token pool table rates, bowling, arcade, board games) for ${STORE_LABELS[storeType] || STORE_LABELS.all}.${userFilter}${venueListText}
+
+IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
+Respond ONLY with a valid JSON object (no surrounding prose or code fences) matching this exact schema:
+{
+  "citySummaryMarkdown": "Brief markdown summary in ${outputLangName} with bullet points of food deals and game rates found in ${targetCity}",
+  "venues": [
+    {
+      "name": "Exact name of one of the venues listed above if info was found",
+      "foodOffers": ["Food deal or promo found on the web, written in ${outputLangName}"],
+      "hasGames": true,
+      "gamePrices": ["Published game rate found (e.g. Pool $X/hour) or clear note if games are offered without an online price, written in ${outputLangName}"],
+      "estimatedFoodPerPerson": null,
+      "estimatedGamePerSession": null,
+      "priceNote": "Brief reference or source note in ${outputLangName}"
+    }
+  ]
+}
+
+Strict rules:
+1. DO NOT invent prices or promotions. If Google Search does not return an exact published numeric price for a venue or game, leave estimatedFoodPerPerson and/or estimatedGamePerSession as null and explain in priceNote or gamePrices.
+2. If a venue on the list mentions pool tables, bowling, or games without an online rate, set hasGames: true and state in gamePrices which games it has and that pricing is confirmed on-site.`
+      : `Search the web for current deals, supermarket promotions, bank or digital wallet discounts, and promotional prices in ${targetCity} for buying ${PRODUCT_LABELS[productCategory] || PRODUCT_LABELS.all} at ${STORE_LABELS[storeType] || STORE_LABELS.all}.${userFilter}${venueListText}
+
+IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
+Respond ONLY with a valid JSON object (no surrounding prose or code fences) matching this exact schema:
+{
+  "citySummaryMarkdown": "Structured summary in ${outputLangName} using ## headings and concrete bullet points (store/chain, active promo or discount, valid days and cap if applicable)",
+  "venues": [
+    {
+      "name": "Exact name of one of the stores listed above if a deal was found",
+      "foodOffers": ["Active promo or applicable bank discount, written in ${outputLangName}"],
+      "hasGames": false,
+      "gamePrices": [],
+      "estimatedFoodPerPerson": null,
+      "estimatedGamePerSession": null,
+      "priceNote": ""
+    }
+  ]
+}
+
+Strict rule: Do not invent stores or prices if they do not appear in the web search; if for a category you only find national chains or bank promos valid in ${targetCity}, state that in citySummaryMarkdown.`;
+
+    interface VenueEnrichment {
+      name: string;
+      foodOffers: string[];
+      hasGames: boolean;
+      gamePrices: string[];
+      estimatedFoodPerPerson: number | null;
+      estimatedGamePerSession: number | null;
+      priceNote: string;
+    }
+
+    try {
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: offerPrompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+          },
+        });
+      } catch (primaryErr) {
+        const errMsg = String((primaryErr as { message?: string })?.message || '');
+        const errStatus = (primaryErr as { status?: number })?.status;
+        if (
+          errStatus === 429 ||
+          errStatus === 503 ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('high demand')
+        ) {
+          response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: offerPrompt,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          });
+        } else {
+          throw primaryErr;
+        }
+      }
+
+      const rawText = (response.text ?? '').trim();
+      let markdown = rawText;
+      let venueEnrichments: VenueEnrichment[] = [];
+
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]) as {
+            citySummaryMarkdown?: string;
+            venues?: VenueEnrichment[];
+          };
+          if (typeof parsed.citySummaryMarkdown === 'string' && parsed.citySummaryMarkdown.trim()) {
+            markdown = parsed.citySummaryMarkdown.trim();
+          }
+          if (Array.isArray(parsed.venues)) {
+            venueEnrichments = parsed.venues.map((v) => ({
+              name: String(v.name || '').trim(),
+              foodOffers: Array.isArray(v.foodOffers) ? v.foodOffers.map(String).filter(Boolean) : [],
+              hasGames: Boolean(v.hasGames),
+              gamePrices: Array.isArray(v.gamePrices) ? v.gamePrices.map(String).filter(Boolean) : [],
+              estimatedFoodPerPerson:
+                typeof v.estimatedFoodPerPerson === 'number' && Number.isFinite(v.estimatedFoodPerPerson)
+                  ? Math.round(v.estimatedFoodPerPerson)
+                  : null,
+              estimatedGamePerSession:
+                typeof v.estimatedGamePerSession === 'number' && Number.isFinite(v.estimatedGamePerSession)
+                  ? Math.round(v.estimatedGamePerSession)
+                  : null,
+              priceNote: String(v.priceNote || '').trim(),
+            }));
+          }
+        } catch {
+          // Keep rawText as markdown fallback when model emits prose
+        }
+      }
+
+      const groundingChunks =
+        response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      const seenUris = new Set<string>();
+      const sources: { title: string; uri: string }[] = [];
+
+      for (const chunk of groundingChunks) {
+        const web = (chunk as { web?: { uri?: string; title?: string } }).web;
+        if (web?.uri && !seenUris.has(web.uri)) {
+          seenUris.add(web.uri);
+          sources.push({
+            title: web.title || web.uri,
+            uri: web.uri,
+          });
+        }
+      }
+
+      res.json({
+        city: targetCity,
+        markdown,
+        venueEnrichments,
+        sources: sources.slice(0, 10),
+      });
+    } catch (error) {
+      const mapped = mapGeminiError(error, lang);
+      res.status(mapped.status).json({ error: mapped.message });
+    }
+  });
+
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: { server: httpServer },
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`CuentasClaras server listening on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
