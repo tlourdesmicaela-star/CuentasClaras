@@ -57,21 +57,6 @@ export function ReceiptScanner({ participants, onImportItems }: ReceiptScannerPr
   const [scanResult, setScanResult] = useState<ReceiptScanResult | null>(null);
   const [selectedPayerId, setSelectedPayerId] = useState<string>(participants[0]?.id || '');
 
-  const sampleReceipts = [
-    {
-      key: 'asado',
-      title: t.scanner.sampleAsadoTitle,
-      subtitle: t.scanner.sampleAsadoSub,
-      imageUrl: '/src/assets/images/sample_receipt_asado_1795185295798.jpg',
-    },
-    {
-      key: 'pizzeria',
-      title: t.scanner.samplePizzeriaTitle,
-      subtitle: t.scanner.samplePizzeriaSub,
-      imageUrl: '/src/assets/images/sample_receipt_pizzeria_1795185293520.jpg',
-    },
-  ];
-
   const activePayerId =
     participants.some((p) => p.id === selectedPayerId)
       ? selectedPayerId
@@ -104,31 +89,6 @@ export function ReceiptScanner({ participants, onImportItems }: ReceiptScannerPr
       detectedTotal: Math.round(Number(data.detectedTotal) || items.reduce((s, i) => s + i.totalPrice, 0)),
       items,
     };
-  };
-
-  const scanSampleReceipt = async (sample: (typeof sampleReceipts)[number]) => {
-    setPreviewUrl(sample.imageUrl);
-    setImageBroken(false);
-    setScanError(null);
-    setIsScanning(true);
-
-    try {
-      const response = await fetch('/api/scan-receipt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sampleKey: sample.key, language }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        setScanError(data.error || t.scanner.scanError);
-        return;
-      }
-      setScanResult(mapServerResponseToResult(data));
-    } catch {
-      setScanError(t.scanner.networkError);
-    } finally {
-      setIsScanning(false);
-    }
   };
 
   const detectQrFromFile = async (file: File): Promise<string | undefined> => {
@@ -247,15 +207,15 @@ export function ReceiptScanner({ participants, onImportItems }: ReceiptScannerPr
 
   return (
     <div className="space-y-5">
-      {/* Upload & Sample Triggers */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      {/* QR Reader Trigger */}
+      <div>
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={isScanning}
-          className="flex flex-col items-center justify-center gap-2 min-h-[104px] p-4 rounded-xl border-2 border-dashed border-emerald-300 dark:border-violet-500/45 bg-emerald-50/40 dark:bg-violet-500/10 text-emerald-900 dark:text-violet-100 hover:bg-emerald-50 dark:hover:bg-violet-500/15 hover:border-emerald-500 dark:hover:border-violet-400 transition-colors cursor-pointer disabled:opacity-50"
+          className="w-full flex flex-col items-center justify-center gap-2.5 min-h-[124px] p-5 rounded-xl border-2 border-dashed border-emerald-300 dark:border-violet-500/45 bg-emerald-50/40 dark:bg-violet-500/10 text-emerald-900 dark:text-violet-100 hover:bg-emerald-50 dark:hover:bg-violet-500/15 hover:border-emerald-500 dark:hover:border-violet-400 transition-colors cursor-pointer disabled:opacity-50"
         >
-          <div className="w-10 h-10 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-violet-400/40 flex items-center justify-center shadow-xs">
+          <div className="w-11 h-11 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-violet-400/40 flex items-center justify-center shadow-xs">
             <QrCode className="w-6 h-6 text-emerald-700 dark:text-violet-300" aria-hidden="true" />
           </div>
           <div className="text-center">
@@ -274,36 +234,6 @@ export function ReceiptScanner({ participants, onImportItems }: ReceiptScannerPr
           onChange={handleFileUpload}
           className="hidden"
         />
-
-        {sampleReceipts.map((sample) => (
-          <button
-            key={sample.key}
-            type="button"
-            onClick={() => scanSampleReceipt(sample)}
-            disabled={isScanning}
-            className="flex items-center gap-3 min-h-[104px] p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:bg-white dark:hover:bg-slate-900 hover:border-emerald-600 dark:hover:border-violet-400/60 text-left transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <div className="w-12 h-16 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700">
-              <img
-                src={sample.imageUrl}
-                alt={sample.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
-              />
-            </div>
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                {sample.title}
-              </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 font-mono tabular-nums">
-                {sample.subtitle}
-              </div>
-              <div className="text-[11px] font-medium text-emerald-700 dark:text-violet-300 mt-1">
-                {t.scanner.trySample}
-              </div>
-            </div>
-          </button>
-        ))}
       </div>
 
       {/* Scanning Loading State */}

@@ -11,6 +11,12 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_\\-][a-z0-9_.-]{1,28}[a-z0-9_\\-]$"
+        },
         "displayName": {
           "type": "string",
           "minLength": 1,
@@ -42,6 +48,12 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_\\-][a-z0-9_.-]{1,28}[a-z0-9_\\-]$"
+        },
         "email": {
           "type": "string",
           "format": "email",
@@ -70,6 +82,30 @@
         }
       },
       "required": ["ownerId", "email", "notifyEnabled", "notifyNewExpense", "notifySettlementReminder", "updatedAt"]
+    },
+    "UsernameReservation": {
+      "title": "UsernameReservation",
+      "description": "Unique lowercase username reservation mapped strictly to a user UID without exposing PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_\\-][a-z0-9_.-]{1,28}[a-z0-9_\\-]$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "username", "createdAt"]
     },
     "Gathering": {
       "title": "Gathering",
@@ -165,6 +201,10 @@
     }
   },
   "firestore": {
+    "/usernames/{usernameKey}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Unique username reservation documents (no PII) owned by the registered user."
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserPublic" },
       "description": "Public profile metadata isolated per user."

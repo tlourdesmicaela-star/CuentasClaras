@@ -148,16 +148,15 @@ export default function App() {
   const { language, setLanguage, t } = useLanguage();
   const [activeTab, setActiveTab] = useState<ActiveTab>('gastos');
   const [inputMode, setInputMode] = useState<InputMode>('ia');
-  const [stripAvatarError, setStripAvatarError] = useState(false);
 
   const {
     user,
-    isSigningIn,
+    authReady,
+    cloudUsername,
     cloudGatherings,
     cloudPaymentDetails,
     cloudNotifyPrefs,
     cloudNotifications,
-    signInWithGoogle,
     saveGatheringToCloud,
     deleteGatheringFromCloud,
     savePrivateProfileToCloud,
@@ -288,11 +287,6 @@ export default function App() {
       // Ignore quota error
     }
   }, [localNotifications]);
-
-  // Reset avatar fallback state if user changes
-  useEffect(() => {
-    setStripAvatarError(false);
-  }, [user?.uid, user?.photoURL]);
 
   // Merge cloud gatherings into local history when signed in
   useEffect(() => {
@@ -790,28 +784,20 @@ export default function App() {
         {/* Compact Workspace Account, Push & Language Strip */}
         <div className="mb-5 flex flex-wrap items-center justify-between gap-2.5 rounded-2xl border border-slate-200/90 dark:border-violet-500/20 bg-white/90 dark:bg-slate-900/75 px-3.5 py-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
-            {user ? (
+            {!authReady ? (
+              <div className="h-7 w-40 rounded-lg bg-slate-100 dark:bg-slate-800 animate-pulse" />
+            ) : user ? (
               <button
                 type="button"
                 onClick={() => handleSelectTab('cuenta')}
                 className="inline-flex items-center gap-2.5 min-w-0 text-left cursor-pointer group"
               >
-                {user.photoURL && !stripAvatarError ? (
-                  <img
-                    src={user.photoURL}
-                    alt={user.displayName || t.strip.connectedAccount}
-                    referrerPolicy="no-referrer"
-                    onError={() => setStripAvatarError(true)}
-                    className="w-7 h-7 rounded-full object-cover border border-slate-200 dark:border-violet-400/50 shrink-0"
-                  />
-                ) : (
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 dark:bg-violet-600 text-white text-xs font-bold flex items-center justify-center shrink-0">
-                    {(user.displayName || user.email || 'U').charAt(0).toUpperCase()}
-                  </div>
-                )}
+                <div className="w-7 h-7 rounded-full bg-emerald-600 dark:bg-violet-600 text-white text-xs font-bold flex items-center justify-center shrink-0">
+                  {(cloudUsername || user.displayName || 'U').charAt(0).toUpperCase()}
+                </div>
                 <span className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate group-hover:text-emerald-700 dark:group-hover:text-violet-300 transition-colors">
                   <strong className="font-semibold text-slate-900 dark:text-slate-50">
-                    {user.displayName || t.strip.connectedAccount}
+                    @{cloudUsername || user.displayName || t.strip.connectedAccount}
                   </strong>{' '}
                   · {t.strip.cloudSyncActive}
                 </span>
@@ -819,12 +805,11 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                onClick={signInWithGoogle}
-                disabled={isSigningIn}
-                className="inline-flex items-center gap-2 min-h-[36px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-violet-500/35 bg-slate-50 dark:bg-violet-500/10 text-xs font-semibold text-slate-800 dark:text-violet-200 hover:border-emerald-600 dark:hover:border-violet-400 transition-colors cursor-pointer disabled:opacity-50"
+                onClick={() => handleSelectTab('cuenta')}
+                className="inline-flex items-center gap-2 min-h-[36px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-violet-500/35 bg-slate-50 dark:bg-violet-500/10 text-xs font-semibold text-slate-800 dark:text-violet-200 hover:border-emerald-600 dark:hover:border-violet-400 transition-colors cursor-pointer"
               >
                 <UserCircle2 className="w-4 h-4 text-emerald-600 dark:text-violet-300 shrink-0" aria-hidden="true" />
-                <span>{isSigningIn ? t.strip.connecting : t.strip.signInGoogle}</span>
+                <span>{t.strip.signInOrRegister}</span>
               </button>
             )}
           </div>

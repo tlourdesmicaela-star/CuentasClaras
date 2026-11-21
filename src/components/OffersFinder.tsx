@@ -16,14 +16,12 @@ import {
   ExternalLink,
   Gamepad2,
   Loader2,
-  LocateFixed,
   MapPin,
   Minus,
   Navigation,
   Plus,
   PlusCircle,
   Search,
-  ShieldCheck,
   Sparkles,
   Star,
   Store,
@@ -73,6 +71,7 @@ interface VenueEnrichment {
   name: string;
   foodOffers: string[];
   hasGames: boolean;
+  gameOffers?: string[];
   gamePrices: string[];
   estimatedFoodPerPerson: number | null;
   estimatedGamePerSession: number | null;
@@ -99,8 +98,6 @@ interface OffersFinderProps {
   participants: Participant[];
   onQuickAddExpense: (description: string, category: ExpenseCategory, amount?: number) => void;
 }
-
-type GpsStatus = 'idle' | 'requesting' | 'active' | 'paused_hidden' | 'denied' | 'unsupported';
 
 const PIN_STYLE_BY_TYPE: Record<
   StoreBucketType,
@@ -160,13 +157,25 @@ function findVenueEnrichment(
   const exact = enrichments.find((e) => normalizeMatchText(e.name) === target);
   if (exact) return exact;
 
+  const substringMatch = enrichments.find((e) => {
+    const candidate = normalizeMatchText(e.name);
+    return (
+      candidate.length >= 4 &&
+      (target.includes(candidate) || candidate.includes(target))
+    );
+  });
+  if (substringMatch) return substringMatch;
+
+  const stopWords = new Set(['bar', 'restobar', 'club', 'pool', 'pub', 'cafe', 'de', 'la', 'el', 'the']);
+  const targetTokens = target.split(' ').filter((w) => w.length >= 3 && !stopWords.has(w));
+  if (!targetTokens.length) return null;
+
   return (
     enrichments.find((e) => {
-      const candidate = normalizeMatchText(e.name);
-      return (
-        candidate.length >= 4 &&
-        (target.includes(candidate) || candidate.includes(target))
-      );
+      const candidateTokens = normalizeMatchText(e.name)
+        .split(' ')
+        .filter((w) => w.length >= 3 && !stopWords.has(w));
+      return candidateTokens.some((tok) => targetTokens.includes(tok));
     }) || null
   );
 }
@@ -331,7 +340,8 @@ function buildDefaultCalcState(
   const hasGames =
     place.storeType === 'juegos_comida' ||
     Boolean(enrichment?.hasGames) ||
-    Boolean(enrichment?.gamePrices.length);
+    Boolean(enrichment?.gamePrices.length) ||
+    Boolean(enrichment?.gameOffers?.length);
 
   return {
     foodMode: 'per_person',
@@ -357,14 +367,6 @@ export function OffersFinder({
     import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
   );
 
-  // Explicit, revocable active-app GPS state
-  const [gpsConsent, setGpsConsent] = useState(false);
-  const [gpsStatus, setGpsStatus] = useState<GpsStatus>('idle');
-  const [gpsError, setGpsError] = useState<string | null>(null);
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const watchIdRef = useRef<number | null>(null);
-  const hasAutoSearchedOnConsentRef = useRef(false);
-
   // Search Mode & Filters
   const [searchMode, setSearchMode] = useState<SearchMode>('salidas');
   const [manualCity, setManualCity] = useState('');
@@ -383,7 +385,7 @@ export function OffersFinder({
   const [offersMarkdown, setOffersMarkdown] = useState<string>('');
   const [venueEnrichments, setVenueEnrichments] = useState<VenueEnrichment[]>([]);
   const [offerSources, setOfferSources] = useState<GroundingSource[]>([]);
-  const [offersError, setOffersError] = useState<string | null>(null);
+  const [offersUnavailable, setOffersUnavailable] = useState(false);
 
   // Per-venue calculator state & expanded cards (Record instead of Map to avoid GoogleMap shadowing)
   const [calcByPlace, setCalcByPlace] = useState<Record<string, VenueCalcState>>({});
@@ -406,103 +408,6 @@ export function OffersFinder({
     };
   }, []);
 
-  const clearGpsWatch = useCallback(() => {
-    if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-    }
-  }, []);
-
-  const startActiveWatch = useCallback(() => {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      setGpsStatus('unsupported');
-      setGpsError(t.offers.gpsUnsupported);
-      return;
-    }
-
-    clearGpsWatch();
-
-    const handlePosition = (pos: GeolocationPosition) => {
-      setUserCoords({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-      });
-      setGpsStatus('active');
-      setGpsError(null);
-    };
-
-    const handleError = (err: GeolocationPositionError) => {
-      if (err.code === err.PERMISSION_DENIED) {
-        setGpsConsent(false);
-        setGpsStatus('denied');
-        setGpsError(t.offers.gpsDenied);
-        clearGpsWatch();
-      } else {
-        setGpsError(t.offers.gpsWeak);
-      }
-    };
-
-    navigator.geolocation.getCurrentPosition(handlePosition, handleError, {
-      enableHighAccuracy: false,
-      maximumAge: 60000,
-      timeout: 10000,
-    });
-
-    watchIdRef.current = navigator.geolocation.watchPosition(handlePosition, handleError, {
-      enableHighAccuracy: false,
-      maximumAge: 60000,
-      timeout: 12000,
-    });
-  }, [clearGpsWatch, t.offers.gpsUnsupported, t.offers.gpsDenied, t.offers.gpsWeak]);
-
-  // Enforce "mientras la app está activa": pause watcher when tab/app goes background
-  useEffect(() => {
-    if (!gpsConsent) {
-      clearGpsWatch();
-      return;
-    }
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        startActiveWatch();
-      } else {
-        clearGpsWatch();
-        setGpsStatus('paused_hidden');
-      }
-    };
-
-    if (document.visibilityState === 'visible') {
-      startActiveWatch();
-    } else {
-      setGpsStatus('paused_hidden');
-    }
-
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      clearGpsWatch();
-    };
-  }, [gpsConsent, startActiveWatch, clearGpsWatch]);
-
-  const handleRequestGpsConsent = () => {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      setGpsStatus('unsupported');
-      setGpsError(t.offers.gpsUnsupported);
-      return;
-    }
-    hasAutoSearchedOnConsentRef.current = false;
-    setGpsStatus('requesting');
-    setGpsError(null);
-    setGpsConsent(true);
-  };
-
-  const handleRevokeGpsConsent = () => {
-    setGpsConsent(false);
-    clearGpsWatch();
-    setGpsStatus('idle');
-    setGpsError(null);
-  };
-
   const handleChangeMode = (nextMode: SearchMode) => {
     setSearchMode(nextMode);
     setStoreType('all');
@@ -511,155 +416,156 @@ export function OffersFinder({
     }
   };
 
-  const runSearch = useCallback(
-    async (coordsOverride?: { lat: number; lng: number } | null) => {
-      const effectiveCoords = coordsOverride !== undefined ? coordsOverride : userCoords;
-      const trimmedCity = manualCity.trim();
+  const runSearch = useCallback(async () => {
+    const trimmedCity = manualCity.trim();
 
-      if (!effectiveCoords && !trimmedCity) {
-        setSearchError(t.offers.missingLocationErr);
-        return;
-      }
-
-      setIsSearching(true);
-      setSearchError(null);
-      setOffersError(null);
-
-      let detectedCity = trimmedCity;
-      let fetchedPlaces: NearbyPlace[] = [];
-
-      try {
-        const storesRes = await fetch('/api/nearby-stores', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lat: effectiveCoords?.lat,
-            lng: effectiveCoords?.lng,
-            cityQuery: trimmedCity,
-            mode: searchMode,
-            storeType,
-            productCategory: searchMode === 'compras' ? productCategory : 'all',
-            openNowOnly,
-            language,
-          }),
-        });
-
-        const storesData = (await storesRes.json()) as {
-          city?: string;
-          center?: { lat: number; lng: number } | null;
-          places?: NearbyPlace[];
-          error?: string;
-          quotaExceeded?: boolean;
-        };
-
-        if (storesRes.status === 429 || storesData.quotaExceeded) {
-          window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-        }
-
-        if (!storesRes.ok) {
-          setSearchError(storesData.error || t.offers.nearbyError);
-          setPlaces([]);
-        } else {
-          fetchedPlaces = storesData.places || [];
-          setPlaces(fetchedPlaces);
-          const firstId = fetchedPlaces[0]?.id || null;
-          setSelectedPlaceId(firstId);
-          if (firstId) {
-            setExpandedCalcIds({ [firstId]: true });
-          }
-          if (storesData.center) {
-            setMapCenter(storesData.center);
-          } else if (effectiveCoords) {
-            setMapCenter(effectiveCoords);
-          }
-          if (storesData.city) {
-            detectedCity = storesData.city;
-            setResolvedCity(storesData.city);
-          }
-        }
-      } catch {
-        setSearchError(t.offers.nearbyNetError);
-      }
-
-      // Grounded web search for food offers + game prices (pool, bowling, arcade)
-      try {
-        const offersRes = await fetch('/api/search-offers', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            city: detectedCity || 'Argentina',
-            mode: searchMode,
-            productCategory: searchMode === 'compras' ? productCategory : 'all',
-            storeType,
-            customQuery,
-            language,
-            venues: fetchedPlaces.slice(0, 10).map((p) => ({
-              id: p.id,
-              name: p.name,
-              storeType: p.storeTypeLabel,
-              address: p.address,
-            })),
-          }),
-        });
-
-        const offersData = (await offersRes.json()) as {
-          city?: string;
-          markdown?: string;
-          venueEnrichments?: VenueEnrichment[];
-          sources?: GroundingSource[];
-          error?: string;
-        };
-
-        if (!offersRes.ok) {
-          setOffersError(offersData.error || t.offers.offersError);
-          setOffersMarkdown('');
-          setVenueEnrichments([]);
-          setOfferSources([]);
-        } else {
-          if (offersData.city && !resolvedCity) {
-            setResolvedCity(offersData.city);
-          }
-          setOffersMarkdown(offersData.markdown || '');
-          setVenueEnrichments(offersData.venueEnrichments || []);
-          setOfferSources(offersData.sources || []);
-        }
-      } catch {
-        setOffersError(t.offers.offersNetError);
-      } finally {
-        setIsSearching(false);
-      }
-    },
-    [
-      userCoords,
-      manualCity,
-      searchMode,
-      storeType,
-      productCategory,
-      openNowOnly,
-      customQuery,
-      resolvedCity,
-      language,
-      t.offers,
-    ]
-  );
-
-  // Trigger initial search automatically once GPS consent yields first coordinates
-  useEffect(() => {
-    if (gpsConsent && userCoords && !hasAutoSearchedOnConsentRef.current) {
-      hasAutoSearchedOnConsentRef.current = true;
-      void runSearch(userCoords);
+    if (!trimmedCity) {
+      setSearchError(t.offers.missingLocationErr);
+      return;
     }
-  }, [gpsConsent, userCoords, runSearch]);
+
+    setIsSearching(true);
+    setSearchError(null);
+    setOffersUnavailable(false);
+
+    let detectedCity = trimmedCity;
+    let fetchedPlaces: NearbyPlace[] = [];
+
+    try {
+      const storesRes = await fetch('/api/nearby-stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cityQuery: trimmedCity,
+          mode: searchMode,
+          storeType,
+          productCategory: searchMode === 'compras' ? productCategory : 'all',
+          openNowOnly,
+          customQuery,
+          language,
+        }),
+      });
+
+      const storesData = (await storesRes.json()) as {
+        city?: string;
+        center?: { lat: number; lng: number } | null;
+        places?: NearbyPlace[];
+        error?: string;
+        quotaExceeded?: boolean;
+      };
+
+      if (storesRes.status === 429 || storesData.quotaExceeded) {
+        window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+      }
+
+      if (!storesRes.ok) {
+        setSearchError(storesData.error || t.offers.nearbyError);
+        setPlaces([]);
+      } else {
+        fetchedPlaces = storesData.places || [];
+        setPlaces(fetchedPlaces);
+        const firstId = fetchedPlaces[0]?.id || null;
+        setSelectedPlaceId(firstId);
+        if (firstId) {
+          setExpandedCalcIds({ [firstId]: true });
+        }
+        if (storesData.center) {
+          setMapCenter(storesData.center);
+        }
+        if (storesData.city) {
+          detectedCity = storesData.city;
+          setResolvedCity(storesData.city);
+        }
+      }
+    } catch {
+      setSearchError(t.offers.nearbyNetError);
+    }
+
+    // Grounded web search for food offers + game prices (pool, bowling, arcade)
+    try {
+      const offersRes = await fetch('/api/search-offers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          city: detectedCity || trimmedCity,
+          mode: searchMode,
+          productCategory: searchMode === 'compras' ? productCategory : 'all',
+          storeType,
+          customQuery,
+          language,
+          venues: fetchedPlaces.slice(0, 10).map((p) => ({
+            id: p.id,
+            name: p.name,
+            storeType: p.storeTypeLabel,
+            address: p.address,
+          })),
+        }),
+      });
+
+      const rawOffersText = await offersRes.text();
+      let offersData: {
+        city?: string;
+        markdown?: string;
+        venueEnrichments?: VenueEnrichment[];
+        sources?: GroundingSource[];
+        error?: string;
+      } | null = null;
+      if (rawOffersText) {
+        try {
+          offersData = JSON.parse(rawOffersText) as {
+            city?: string;
+            markdown?: string;
+            venueEnrichments?: VenueEnrichment[];
+            sources?: GroundingSource[];
+            error?: string;
+          };
+        } catch {
+          offersData = null;
+        }
+      }
+
+      if (!offersRes.ok || !offersData || !offersData.markdown) {
+        setOffersUnavailable(true);
+        setOffersMarkdown('');
+        setVenueEnrichments([]);
+        setOfferSources([]);
+      } else {
+        if (offersData.city && !resolvedCity) {
+          setResolvedCity(offersData.city);
+        }
+        setOffersUnavailable(false);
+        setOffersMarkdown(offersData.markdown || '');
+        setVenueEnrichments(offersData.venueEnrichments || []);
+        setOfferSources(offersData.sources || []);
+      }
+    } catch {
+      setOffersUnavailable(true);
+      setOffersMarkdown('');
+      setVenueEnrichments([]);
+      setOfferSources([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [
+    manualCity,
+    searchMode,
+    storeType,
+    productCategory,
+    openNowOnly,
+    customQuery,
+    resolvedCity,
+    language,
+    t.offers,
+  ]);
 
   const effectiveMapCenter = useMemo(() => {
     if (mapCenter) return mapCenter;
-    if (userCoords) return userCoords;
     const firstWithCoords = places.find((p) => p.lat !== null && p.lng !== null);
     if (firstWithCoords && firstWithCoords.lat !== null && firstWithCoords.lng !== null) {
       return { lat: firstWithCoords.lat, lng: firstWithCoords.lng };
     }
     return null;
-  }, [mapCenter, userCoords, places]);
+  }, [mapCenter, places]);
 
   const getCalcForPlace = (place: NearbyPlace, enrichment: VenueEnrichment | null): VenueCalcState => {
     return calcByPlace[place.id] || buildDefaultCalcState(place, enrichment);
@@ -774,66 +680,7 @@ export function OffersFinder({
           </button>
         </div>
 
-        {/* Explicit Active-App GPS Permission Banner */}
-        <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/70 p-3.5 sm:p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="flex items-start gap-2.5">
-              <ShieldCheck
-                className="w-5 h-5 text-emerald-600 dark:text-violet-400 shrink-0 mt-0.5"
-                aria-hidden="true"
-              />
-              <div>
-                <p className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {gpsStatus === 'active'
-                    ? t.offers.gpsActiveTitle
-                    : gpsStatus === 'paused_hidden'
-                      ? t.offers.gpsPausedHiddenTitle
-                      : t.offers.gpsIdleTitle}
-                </p>
-                <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
-                  {gpsStatus === 'active' && userCoords
-                    ? `${t.offers.gpsActiveDescPrefix} (${userCoords.lat.toFixed(4)}, ${userCoords.lng.toFixed(4)}). ${t.offers.gpsActiveDescSuffix}`
-                    : t.offers.gpsIdleDesc}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              {!gpsConsent ? (
-                <button
-                  type="button"
-                  onClick={handleRequestGpsConsent}
-                  disabled={gpsStatus === 'requesting'}
-                  className="inline-flex items-center justify-center gap-1.5 min-h-[42px] px-4 py-2 rounded-xl bg-emerald-600 dark:bg-violet-600 text-white text-xs sm:text-sm font-semibold hover:bg-emerald-700 dark:hover:bg-violet-500 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {gpsStatus === 'requesting' ? (
-                    <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <LocateFixed className="w-4 h-4" aria-hidden="true" />
-                  )}
-                  <span>{t.offers.allowGpsBtn}</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleRevokeGpsConsent}
-                  className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-rose-400 dark:hover:border-rose-500/50 transition-colors cursor-pointer"
-                >
-                  <span>{t.offers.pauseGpsBtn}</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {gpsError && (
-            <p className="text-xs text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-              <span>{gpsError}</span>
-            </p>
-          )}
-        </div>
-
-        {/* City Fallback + Filters */}
+        {/* City Input + Filters */}
         <div className="space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
             <div className="sm:col-span-5">
@@ -841,7 +688,7 @@ export function OffersFinder({
                 htmlFor="offers-city-input"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5"
               >
-                {t.offers.cityLabel} {userCoords ? t.offers.cityHintWithGps : t.offers.cityHintNoGps}
+                {t.offers.cityLabel}
               </label>
               <input
                 id="offers-city-input"
@@ -888,6 +735,43 @@ export function OffersFinder({
               />
             </div>
           </div>
+
+          {searchMode === 'salidas' && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mr-1">
+                {t.offers.quickGameChipsLabel}
+              </span>
+              {[
+                { label: t.offers.chipPool, query: 'pool billar', type: 'juegos_comida' as OfferStoreType },
+                { label: t.offers.chipArcade, query: 'arcade juegos fichas', type: 'juegos_comida' as OfferStoreType },
+                { label: t.offers.chipBowling, query: 'bowling', type: 'juegos_comida' as OfferStoreType },
+                { label: t.offers.chipGameCombo, query: 'promo juegos comida happy hour', type: 'juegos_comida' as OfferStoreType },
+              ].map((chip) => {
+                const isSelectedChip = customQuery.trim().toLowerCase() === chip.query;
+                return (
+                  <button
+                    key={chip.query}
+                    type="button"
+                    onClick={() => {
+                      if (isSelectedChip) {
+                        setCustomQuery('');
+                      } else {
+                        setCustomQuery(chip.query);
+                        setStoreType(chip.type);
+                      }
+                    }}
+                    className={`min-h-[32px] px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
+                      isSelectedChip
+                        ? 'bg-sky-600 dark:bg-violet-600 text-white border-sky-600 dark:border-violet-500'
+                        : 'bg-slate-50 dark:bg-slate-950/60 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-sky-400 dark:hover:border-violet-400'
+                    }`}
+                  >
+                    {chip.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {searchMode === 'compras' && (
             <div>
@@ -1017,15 +901,6 @@ export function OffersFinder({
                     >
                       <MapCameraSync center={effectiveMapCenter} />
 
-                      {userCoords && (
-                        <AdvancedMarker position={userCoords} title={t.offers.userLocationTitle}>
-                          <div
-                            className="w-4 h-4 rounded-full bg-sky-500 border-2 border-white shadow-md"
-                            aria-label={t.offers.userLocationTitle}
-                          />
-                        </AdvancedMarker>
-                      )}
-
                       {places.map((place) => (
                         <StoreMarker
                           key={place.id}
@@ -1071,11 +946,6 @@ export function OffersFinder({
                         <span className="w-2.5 h-2.5 rounded-full bg-[#7c3aed]" /> {t.offers.legendIceCream}
                       </span>
                     </>
-                  )}
-                  {userCoords && (
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-full bg-sky-500" /> {t.offers.legendYou}
-                    </span>
                   )}
                 </div>
               </section>
@@ -1132,7 +1002,8 @@ export function OffersFinder({
                       place.storeType === 'juegos_comida' ||
                       place.storeType === 'restobar' ||
                       Boolean(enrichment?.hasGames) ||
-                      (enrichment?.gamePrices.length ?? 0) > 0;
+                      (enrichment?.gamePrices.length ?? 0) > 0 ||
+                      (enrichment?.gameOffers?.length ?? 0) > 0;
 
                     return (
                       <article
@@ -1236,25 +1107,56 @@ export function OffersFinder({
 
                           {/* Games & Pricing (Pool / Bowling / Arcade) */}
                           {showGamesSection && (
-                            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-2.5 space-y-1">
+                            <div className="rounded-lg border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-2.5 space-y-1.5">
                               <p className="text-[11px] font-semibold uppercase tracking-wider text-sky-700 dark:text-sky-300 flex items-center gap-1.5">
                                 <Gamepad2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                                 <span>{t.offers.gamesTitle}</span>
                               </p>
-                              {enrichment && enrichment.gamePrices.length > 0 ? (
-                                <ul className="space-y-1 text-xs text-slate-700 dark:text-slate-300">
-                                  {enrichment.gamePrices.map((gp, i) => (
-                                    <li key={i} className="flex items-start gap-1.5">
-                                      <span className="mt-1.5 w-1 h-1 rounded-full bg-sky-500 shrink-0" />
-                                      <span>{gp}</span>
-                                    </li>
-                                  ))}
-                                </ul>
+                              {enrichment &&
+                              ((enrichment.gameOffers?.length ?? 0) > 0 || enrichment.gamePrices.length > 0) ? (
+                                <div className="space-y-1.5 text-xs text-slate-700 dark:text-slate-300">
+                                  {(enrichment.gameOffers?.length ?? 0) > 0 && (
+                                    <div className="space-y-1">
+                                      <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-violet-300">
+                                        {t.offers.gameOffersLabel}
+                                      </p>
+                                      <ul className="space-y-1">
+                                        {enrichment.gameOffers!.map((offer, i) => (
+                                          <li key={i} className="flex items-start gap-1.5">
+                                            <span className="mt-1.5 w-1 h-1 rounded-full bg-emerald-600 dark:bg-violet-400 shrink-0" />
+                                            <span>{offer}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                  {enrichment.gamePrices.length > 0 && (
+                                    <div className="space-y-1">
+                                      {(enrichment.gameOffers?.length ?? 0) > 0 && (
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-300">
+                                          {t.offers.gameRatesLabel}
+                                        </p>
+                                      )}
+                                      <ul className="space-y-1">
+                                        {enrichment.gamePrices.map((gp, i) => (
+                                          <li key={i} className="flex items-start gap-1.5">
+                                            <span className="mt-1.5 w-1 h-1 rounded-full bg-sky-500 shrink-0" />
+                                            <span>{gp}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
                               ) : (
                                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                                  {place.storeType === 'juegos_comida'
-                                    ? t.offers.gamesNoOnlinePrice
-                                    : t.offers.gamesOptionalHint}
+                                  {isSearching
+                                    ? t.offers.searchingVenuePromos
+                                    : customQuery.trim()
+                                      ? `${t.offers.gamesSearchNoOnlinePricePrefix} "${customQuery.trim()}". ${t.offers.gamesNoOnlinePrice}`
+                                      : place.storeType === 'juegos_comida'
+                                        ? t.offers.gamesNoOnlinePrice
+                                        : t.offers.gamesOptionalHint}
                                 </p>
                               )}
                             </div>
@@ -1595,9 +1497,33 @@ export function OffersFinder({
                 </h3>
               </div>
 
-              {offersError ? (
-                <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-950/30 p-3 text-xs text-amber-800 dark:text-amber-200">
-                  {offersError}
+              {offersUnavailable ? (
+                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+                  <div className="flex items-start gap-2.5">
+                    <MapPin
+                      className="w-4 h-4 text-emerald-600 dark:text-violet-400 shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <div className="space-y-1 min-w-0">
+                      <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                        {t.offers.mapsPromoTipTitle}
+                      </p>
+                      <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                        {t.offers.mapsPromoTipBody}
+                      </p>
+                    </div>
+                  </div>
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                      `${customQuery.trim() || (searchMode === 'salidas' ? 'promociones restaurantes restobares pool' : 'ofertas carnicerias supermercados')} ${resolvedCity || manualCity.trim() || 'Argentina'}`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-violet-500/35 bg-white dark:bg-slate-900 text-xs font-semibold text-emerald-700 dark:text-violet-300 hover:border-emerald-400 dark:hover:border-violet-400 transition-colors"
+                  >
+                    <span>{t.offers.searchPromosInMapsBtn}</span>
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  </a>
                 </div>
               ) : isSearching && !offersMarkdown ? (
                 <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">

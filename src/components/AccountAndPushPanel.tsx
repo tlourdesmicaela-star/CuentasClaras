@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import {
   AlertCircle,
   Bell,
@@ -7,11 +7,18 @@ import {
   Check,
   Cloud,
   Download,
+  Eye,
+  EyeOff,
   Globe,
-  LogOut,
+  KeyRound,
+  LogIn,
+  Mail,
   Send,
+  ShieldCheck,
   Smartphone,
   Trash2,
+  User,
+  UserPlus,
 } from 'lucide-react';
 import { useFirebase, type CloudNotificationItem } from '../contexts/FirebaseContext';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -39,6 +46,8 @@ interface AccountAndPushPanelProps {
   gatheringTitle: string;
 }
 
+type AuthMode = 'register' | 'login';
+
 export function AccountAndPushPanel({
   permission,
   swReady,
@@ -57,16 +66,44 @@ export function AccountAndPushPanel({
     authReady,
     isSigningIn,
     authError,
+    cloudUsername,
+    cloudUserEmail,
     cloudGatherings,
-    signInWithGoogle,
-    signOutUser,
+    registerAccount,
+    loginWithUsername,
+    clearAuthError,
   } = useFirebase();
 
   const { language, setLanguage, t } = useLanguage();
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
-  const [avatarError, setAvatarError] = useState(false);
   const [pushFeedback, setPushFeedback] = useState<string | null>(null);
+
+  const [authMode, setAuthMode] = useState<AuthMode>('register');
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
+  const handleSwitchMode = (nextMode: AuthMode) => {
+    setAuthMode(nextMode);
+    clearAuthError();
+  };
+
+  const handleAuthSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (authMode === 'register') {
+      const ok = await registerAccount({ email, username, password });
+      if (ok) {
+        setPassword('');
+      }
+    } else {
+      const ok = await loginWithUsername({ username, password });
+      if (ok) {
+        setPassword('');
+      }
+    }
+  };
 
   const handleEnablePush = async () => {
     setPushFeedback(null);
@@ -120,6 +157,12 @@ export function AccountAndPushPanel({
   };
 
   const isNotificationsActive = permission === 'granted' && prefs.notifyEnabled;
+  const activeDisplayUsername = cloudUsername || user?.displayName || t.account.connectedAccount;
+  const activeEmail =
+    cloudUserEmail ||
+    (user?.email && !user.email.toLowerCase().endsWith('@auth.cuentasclaras.app')
+      ? user.email
+      : null);
 
   return (
     <div className="space-y-5">
@@ -166,15 +209,15 @@ export function AccountAndPushPanel({
         </div>
       </section>
 
-      {/* 1. Google Account Registration & Cloud Sync */}
+      {/* 1. Account Registration (Email + Username + Password) & Persistent Session */}
       <section className="bg-white dark:bg-slate-900/85 border border-slate-200 dark:border-slate-800/90 dark:shadow-[0_0_28px_-12px_rgba(139,92,246,0.22)] rounded-2xl p-5 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-display font-bold text-slate-900 dark:text-slate-50">
-              {t.account.googleTitle}
+              {t.account.accountTitle}
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              {t.account.googleSubtitle}
+              {t.account.accountSubtitle}
             </p>
           </div>
           {user && (
@@ -189,77 +232,234 @@ export function AccountAndPushPanel({
           {!authReady ? (
             <div className="h-14 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse" />
           ) : user ? (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/70">
-              <div className="flex items-center gap-3.5 min-w-0">
-                {user.photoURL && !avatarError ? (
-                  <img
-                    src={user.photoURL}
-                    alt={user.displayName || t.account.connectedAccount}
-                    referrerPolicy="no-referrer"
-                    onError={() => setAvatarError(true)}
-                    className="w-11 h-11 rounded-full object-cover border border-slate-200 dark:border-violet-400/50 shrink-0"
-                  />
-                ) : (
+            <div className="space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/70">
+                <div className="flex items-center gap-3.5 min-w-0">
                   <div className="w-11 h-11 rounded-full bg-emerald-600 dark:bg-violet-600 text-white font-display font-bold flex items-center justify-center shrink-0">
-                    {(user.displayName || user.email || 'U').charAt(0).toUpperCase()}
+                    {activeDisplayUsername.charAt(0).toUpperCase()}
                   </div>
-                )}
-                <div className="min-w-0">
-                  <div className="text-sm font-bold text-slate-900 dark:text-slate-50 truncate">
-                    {user.displayName || t.account.connectedAccount}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-slate-900 dark:text-slate-50 truncate">
+                      @{activeDisplayUsername}
+                    </div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                      {activeEmail ? `${activeEmail} · ` : ''}
+                      {t.account.sessionPersistedBadge}
+                    </div>
                   </div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                    {user.email} · {t.account.verifiedGoogle}
-                  </div>
+                </div>
+
+                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-violet-500/15 border border-emerald-200 dark:border-violet-500/30 text-xs font-semibold text-emerald-800 dark:text-violet-200 shrink-0">
+                  <ShieldCheck className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{t.account.sessionPersistedBadge}</span>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={signOutUser}
-                className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-rose-300 dark:hover:border-rose-500/50 hover:text-rose-700 dark:hover:text-rose-300 transition-colors cursor-pointer shrink-0"
-              >
-                <LogOut className="w-4 h-4" aria-hidden="true" />
-                <span>{t.account.signOut}</span>
-              </button>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed px-1">
+                {t.account.sessionPersistedNote}
+              </p>
             </div>
           ) : (
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={signInWithGoogle}
-                disabled={isSigningIn}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-3 min-h-[48px] px-5 py-3 rounded-xl bg-white dark:bg-slate-950 border border-slate-300 dark:border-violet-500/45 text-sm font-semibold text-slate-900 dark:text-slate-50 hover:bg-slate-50 dark:hover:bg-slate-900 dark:shadow-[0_0_20px_-6px_rgba(139,92,246,0.45)] active:scale-[0.99] transition-all cursor-pointer disabled:opacity-50"
-              >
-                <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    fill="#4285F4"
-                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                  />
-                </svg>
-                <span>
-                  {isSigningIn ? t.account.connectingGoogle : t.account.signInGoogle}
-                </span>
-              </button>
+            <div className="space-y-4">
+              {/* Mode Switcher: Create Account vs Sign In */}
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-950/80 border border-slate-200/70 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchMode('register')}
+                  className={`inline-flex items-center justify-center gap-2 min-h-[42px] px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                    authMode === 'register'
+                      ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-violet-200 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <UserPlus className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{t.account.tabRegister}</span>
+                </button>
 
-              {authError && (
-                <div className="flex items-start gap-2 rounded-xl border border-rose-200 dark:border-rose-900/70 bg-rose-50 dark:bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-800 dark:text-rose-200">
-                  <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" aria-hidden="true" />
-                  <span>{authError}</span>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchMode('login')}
+                  className={`inline-flex items-center justify-center gap-2 min-h-[42px] px-3 rounded-lg text-xs sm:text-sm font-semibold transition-all cursor-pointer ${
+                    authMode === 'login'
+                      ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-violet-200 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <LogIn className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{t.account.tabLogin}</span>
+                </button>
+              </div>
+
+              {authMode === 'login' && (
+                <div className="rounded-xl border border-emerald-200/80 dark:border-violet-500/25 bg-emerald-50/70 dark:bg-violet-500/[0.08] px-3.5 py-2.5 text-xs text-emerald-900 dark:text-violet-200 leading-relaxed">
+                  {t.account.loginUninstallHint}
                 </div>
               )}
+
+              <form onSubmit={(e) => void handleAuthSubmit(e)} className="space-y-3.5">
+                {authMode === 'register' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+                      {t.account.emailLabel}
+                    </label>
+                    <div className="relative">
+                      <Mail
+                        className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                        aria-hidden="true"
+                      />
+                      <input
+                        type="email"
+                        required
+                        autoComplete="email"
+                        value={email}
+                        onChange={(e) => {
+                          setEmail(e.target.value);
+                          if (authError) clearAuthError();
+                        }}
+                        placeholder={t.account.emailPlaceholder}
+                        className="w-full min-h-[44px] pl-10 pr-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 dark:focus:border-violet-400"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+                    {t.account.usernameLabel}
+                  </label>
+                  <div className="relative">
+                    <User
+                      className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                      aria-hidden="true"
+                    />
+                    <input
+                      type="text"
+                      required
+                      autoComplete="username"
+                      value={username}
+                      onChange={(e) => {
+                        setUsername(e.target.value);
+                        if (authError) clearAuthError();
+                      }}
+                      placeholder={t.account.usernamePlaceholder}
+                      className="w-full min-h-[44px] pl-10 pr-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 dark:focus:border-violet-400"
+                    />
+                  </div>
+                  {authMode === 'register' && (
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      {t.account.usernameHint}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+                    {t.account.passwordLabel}
+                  </label>
+                  <div className="relative">
+                    <KeyRound
+                      className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                      aria-hidden="true"
+                    />
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      maxLength={15}
+                      autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                      value={password}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (authError) clearAuthError();
+                      }}
+                      placeholder={t.account.passwordPlaceholder}
+                      className="w-full min-h-[44px] pl-10 pr-11 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 dark:focus:border-violet-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      aria-label={showPassword ? t.account.hidePassword : t.account.showPassword}
+                      className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 absolute right-1.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-4 h-4" aria-hidden="true" />
+                      ) : (
+                        <Eye className="w-4 h-4" aria-hidden="true" />
+                      )}
+                    </button>
+                  </div>
+                  {authMode === 'register' && (
+                    <div className="mt-1.5 space-y-1">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {t.account.passwordHint}
+                      </p>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+                        <span
+                          className={
+                            password.length >= 6 && password.length <= 15
+                              ? 'text-emerald-700 dark:text-emerald-400 font-medium'
+                              : 'text-slate-400 dark:text-slate-500'
+                          }
+                        >
+                          • {t.account.passwordRuleLength} ({password.length}/15)
+                        </span>
+                        <span
+                          className={
+                            /[A-Z]/.test(password)
+                              ? 'text-emerald-700 dark:text-emerald-400 font-medium'
+                              : 'text-slate-400 dark:text-slate-500'
+                          }
+                        >
+                          • {t.account.passwordRuleUpper}
+                        </span>
+                        <span
+                          className={
+                            password.length > 0 &&
+                            /^[A-Za-z0-9]+$/.test(password) &&
+                            /[A-Za-z]/.test(password) &&
+                            /[0-9]/.test(password)
+                              ? 'text-emerald-700 dark:text-emerald-400 font-medium'
+                              : 'text-slate-400 dark:text-slate-500'
+                          }
+                        >
+                          • {t.account.passwordRuleAlnum}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {authError && (
+                  <div className="flex items-start gap-2 rounded-xl border border-rose-200 dark:border-rose-900/70 bg-rose-50 dark:bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-800 dark:text-rose-200">
+                    <AlertCircle
+                      className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <span>{authError}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isSigningIn}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 min-h-[46px] px-6 py-2.5 rounded-xl bg-emerald-600 dark:bg-violet-600 text-white text-sm font-semibold hover:bg-emerald-700 dark:hover:bg-violet-500 dark:shadow-[0_0_20px_-6px_rgba(139,92,246,0.55)] active:scale-[0.99] transition-all cursor-pointer disabled:opacity-50"
+                >
+                  {authMode === 'register' ? (
+                    <UserPlus className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <LogIn className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  )}
+                  <span>
+                    {isSigningIn
+                      ? authMode === 'register'
+                        ? t.account.registeringBtn
+                        : t.account.loggingInBtn
+                      : authMode === 'register'
+                        ? t.account.registerBtn
+                        : t.account.loginBtn}
+                  </span>
+                </button>
+              </form>
             </div>
           )}
         </div>

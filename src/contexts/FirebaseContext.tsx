@@ -3,10 +3,20 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import {
+  browserLocalPersistence,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+  type User,
+} from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -18,10 +28,15 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../firebase';
+import { useLanguage } from '../contexts/LanguageContext';
 import type { Gathering, PaymentDetails } from '../types/expense';
 import type { NotificationPrefs } from '../hooks/usePushNotifications';
+
+const STORAGE_DEVICE_SESSION_KEY = 'cuentasclaras_device_session_v1';
+const INTERNAL_AUTH_DOMAIN = 'auth.cuentasclaras.app';
 
 export interface CloudNotificationItem {
   id: string;
@@ -32,17 +47,31 @@ export interface CloudNotificationItem {
   createdAtIso: string;
 }
 
+interface RegisterParams {
+  email: string;
+  username: string;
+  password: string;
+}
+
+interface LoginParams {
+  username: string;
+  password: string;
+}
+
 interface FirebaseContextValue {
   user: User | null;
   authReady: boolean;
   isSigningIn: boolean;
   authError: string | null;
+  cloudUsername: string | null;
+  cloudUserEmail: string | null;
   cloudGatherings: Gathering[];
   cloudPaymentDetails: PaymentDetails | null;
   cloudNotifyPrefs: NotificationPrefs | null;
   cloudNotifications: CloudNotificationItem[];
-  signInWithGoogle: () => Promise<void>;
-  signOutUser: () => Promise<void>;
+  registerAccount: (params: RegisterParams) => Promise<boolean>;
+  loginWithUsername: (params: LoginParams) => Promise<boolean>;
+  clearAuthError: () => void;
   saveGatheringToCloud: (gathering: Gathering) => Promise<void>;
   deleteGatheringFromCloud: (gatheringId: string) => Promise<void>;
   savePrivateProfileToCloud: (
@@ -66,16 +95,70 @@ function sanitizeId(raw: string): string {
   return cleaned || `id-${Date.now()}`;
 }
 
+function normalizeUsername(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function isValidUsernameFormat(usernameLower: string): boolean {
+  return (
+    usernameLower.length >= 3 &&
+    usernameLower.length <= 30 &&
+    /^[a-z0-9_-][a-z0-9_.-]{1,28}[a-z0-9_-]$/.test(usernameLower) &&
+    !/\.\./.test(usernameLower)
+  );
+}
+
+function isValidEmailFormat(email: string): boolean {
+  return email.length >= 3 && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
+function isValidPasswordFormat(password: string): boolean {
+  return (
+    password.length >= 6 &&
+    password.length <= 15 &&
+    /^[A-Za-z0-9]+$/.test(password) &&
+    /[A-Z]/.test(password) &&
+    /[0-9]/.test(password)
+  );
+}
+
+function toInternalAuthEmail(usernameLower: string): string {
+  return `${usernameLower}@${INTERNAL_AUTH_DOMAIN}`;
+}
+
+function isInternalAuthEmail(email: string | null | undefined): boolean {
+  return Boolean(email && email.toLowerCase().endsWith(`@${INTERNAL_AUTH_DOMAIN}`));
+}
+
+function writeDeviceSessionMarker(username: string): void {
+  try {
+    localStorage.setItem(
+      STORAGE_DEVICE_SESSION_KEY,
+      JSON.stringify({
+        username,
+        persistedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function FirebaseProvider({ children }: { children: ReactNode }) {
+  const { t } = useLanguage();
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const [cloudUsername, setCloudUsername] = useState<string | null>(null);
+  const [cloudUserEmail, setCloudUserEmail] = useState<string | null>(null);
   const [cloudGatherings, setCloudGatherings] = useState<Gathering[]>([]);
   const [cloudPaymentDetails, setCloudPaymentDetails] = useState<PaymentDetails | null>(null);
   const [cloudNotifyPrefs, setCloudNotifyPrefs] = useState<NotificationPrefs | null>(null);
   const [cloudNotifications, setCloudNotifications] = useState<CloudNotificationItem[]>([]);
+
+  const isRegisteringRef = useRef(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
@@ -83,24 +166,47 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       setAuthReady(true);
 
       if (nextUser) {
+        if (isRegisteringRef.current) {
+          return;
+        }
+
         try {
+          const fallbackDisplay = (nextUser.displayName || 'usuario').slice(0, 120);
+          const derivedUsernameLower = isValidUsernameFormat(normalizeUsername(fallbackDisplay))
+            ? normalizeUsername(fallbackDisplay)
+            : nextUser.email && isInternalAuthEmail(nextUser.email)
+              ? normalizeUsername(nextUser.email.split('@')[0] || '')
+              : '';
+
+          writeDeviceSessionMarker(derivedUsernameLower || fallbackDisplay);
+
           const userRef = doc(db, 'users', nextUser.uid);
           const userSnap = await getDoc(userRef);
-          const displayName = (nextUser.displayName || 'Usuario CuentasClaras').slice(0, 120);
-          const photoURL = (nextUser.photoURL || '').slice(0, 512);
 
           if (!userSnap.exists()) {
             await setDoc(userRef, {
               uid: nextUser.uid,
-              displayName,
-              ...(photoURL ? { photoURL } : {}),
+              ...(derivedUsernameLower && isValidUsernameFormat(derivedUsernameLower)
+                ? { username: derivedUsernameLower }
+                : {}),
+              displayName: fallbackDisplay,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
           } else {
+            const existingData = userSnap.data();
+            const existingUsername =
+              typeof existingData.username === 'string'
+                ? existingData.username
+                : typeof existingData.displayName === 'string'
+                  ? existingData.displayName
+                  : fallbackDisplay;
+            setCloudUsername(existingUsername);
             await updateDoc(userRef, {
-              displayName,
-              ...(photoURL ? { photoURL } : {}),
+              displayName:
+                typeof existingData.displayName === 'string' && existingData.displayName
+                  ? existingData.displayName
+                  : fallbackDisplay,
               updatedAt: serverTimestamp(),
             });
           }
@@ -108,11 +214,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           const privateRef = doc(db, 'users', nextUser.uid, 'private', 'profile');
           const privateSnap = await getDoc(privateRef);
           if (!privateSnap.exists()) {
+            const safeEmail =
+              nextUser.email && !isInternalAuthEmail(nextUser.email)
+                ? nextUser.email.slice(0, 254)
+                : 'sin-email@cuentasclaras.app';
             await setDoc(privateRef, {
               ownerId: nextUser.uid,
-              email: (nextUser.email || 'sin-email@cuentasclaras.app').slice(0, 254),
+              ...(derivedUsernameLower && isValidUsernameFormat(derivedUsernameLower)
+                ? { username: derivedUsernameLower }
+                : {}),
+              email: safeEmail,
               aliasOrCbu: '',
-              accountHolder: displayName,
+              accountHolder: fallbackDisplay,
               notifyEnabled: false,
               notifyNewExpense: true,
               notifySettlementReminder: true,
@@ -123,6 +236,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           console.error('Error initializing user profile in Firestore:', error);
         }
       } else {
+        setCloudUsername(null);
+        setCloudUserEmail(null);
         setCloudGatherings([]);
         setCloudPaymentDetails(null);
         setCloudNotifyPrefs(null);
@@ -142,6 +257,17 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       (snap) => {
         if (snap.exists()) {
           const data = snap.data();
+          if (typeof data.username === 'string' && data.username) {
+            setCloudUsername(data.username);
+          }
+          if (
+            typeof data.email === 'string' &&
+            data.email &&
+            !isInternalAuthEmail(data.email) &&
+            data.email !== 'sin-email@cuentasclaras.app'
+          ) {
+            setCloudUserEmail(data.email);
+          }
           setCloudPaymentDetails({
             aliasOrCbu: typeof data.aliasOrCbu === 'string' ? data.aliasOrCbu : '',
             accountHolder: typeof data.accountHolder === 'string' ? data.accountHolder : '',
@@ -223,29 +349,149 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     };
   }, [authReady, user]);
 
-  const signInWithGoogle = useCallback(async () => {
-    setIsSigningIn(true);
+  const clearAuthError = useCallback(() => {
     setAuthError(null);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (error) {
-      const code = (error as { code?: string })?.code || '';
-      if (code === 'auth/popup-closed-by-user') {
-        setAuthError('Cerraste la ventana de Google antes de completar el ingreso.');
-      } else if (code === 'auth/popup-blocked') {
-        setAuthError('El navegador bloqueó la ventana emergente de Google. Permití popups para continuar.');
-      } else {
-        setAuthError(error instanceof Error ? error.message : 'No se pudo iniciar sesión con Google.');
-      }
-    } finally {
-      setIsSigningIn(false);
-    }
   }, []);
 
-  const signOutUser = useCallback(async () => {
-    setAuthError(null);
-    await signOut(auth);
-  }, []);
+  const registerAccount = useCallback(
+    async ({ email, username, password }: RegisterParams): Promise<boolean> => {
+      const cleanEmail = email.trim().toLowerCase();
+      const cleanUsername = username.trim();
+      const usernameLower = normalizeUsername(cleanUsername);
+
+      if (!isValidEmailFormat(cleanEmail)) {
+        setAuthError(t.account.errInvalidEmail);
+        return false;
+      }
+      if (!isValidUsernameFormat(usernameLower)) {
+        setAuthError(t.account.errInvalidUsername);
+        return false;
+      }
+      if (!isValidPasswordFormat(password)) {
+        setAuthError(t.account.errWeakPassword);
+        return false;
+      }
+
+      setIsSigningIn(true);
+      setAuthError(null);
+      isRegisteringRef.current = true;
+
+      let createdUser: User | null = null;
+
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+        const cred = await createUserWithEmailAndPassword(
+          auth,
+          toInternalAuthEmail(usernameLower),
+          password
+        );
+        createdUser = cred.user;
+
+        await updateProfile(cred.user, { displayName: cleanUsername.slice(0, 120) });
+
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'usernames', usernameLower), {
+          uid: cred.user.uid,
+          username: usernameLower,
+          createdAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'users', cred.user.uid), {
+          uid: cred.user.uid,
+          username: usernameLower,
+          displayName: cleanUsername.slice(0, 120),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'users', cred.user.uid, 'private', 'profile'), {
+          ownerId: cred.user.uid,
+          username: usernameLower,
+          email: cleanEmail.slice(0, 254),
+          aliasOrCbu: '',
+          accountHolder: cleanUsername.slice(0, 120),
+          notifyEnabled: false,
+          notifyNewExpense: true,
+          notifySettlementReminder: true,
+          updatedAt: serverTimestamp(),
+        });
+        await batch.commit();
+
+        writeDeviceSessionMarker(usernameLower);
+        setCloudUsername(cleanUsername);
+        setCloudUserEmail(cleanEmail);
+        return true;
+      } catch (error) {
+        if (createdUser) {
+          await createdUser.delete().catch(() => {});
+          await signOut(auth).catch(() => {});
+        }
+        const code = (error as { code?: string })?.code || '';
+        if (code === 'auth/email-already-in-use') {
+          setAuthError(t.account.errUsernameTaken);
+        } else if (code === 'auth/weak-password') {
+          setAuthError(t.account.errWeakPassword);
+        } else if (code === 'auth/operation-not-allowed') {
+          setAuthError(t.account.errProviderDisabled);
+        } else if (code === 'auth/network-request-failed') {
+          setAuthError(t.account.errNetwork);
+        } else {
+          setAuthError(error instanceof Error ? error.message : t.account.errGenericRegister);
+        }
+        return false;
+      } finally {
+        isRegisteringRef.current = false;
+        setIsSigningIn(false);
+      }
+    },
+    [t]
+  );
+
+  const loginWithUsername = useCallback(
+    async ({ username, password }: LoginParams): Promise<boolean> => {
+      const cleanUsername = username.trim();
+      const usernameLower = normalizeUsername(cleanUsername);
+
+      if (!isValidUsernameFormat(usernameLower)) {
+        setAuthError(t.account.errInvalidUsername);
+        return false;
+      }
+      if (!password) {
+        setAuthError(t.account.errPasswordRequired);
+        return false;
+      }
+
+      setIsSigningIn(true);
+      setAuthError(null);
+
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+        await signInWithEmailAndPassword(auth, toInternalAuthEmail(usernameLower), password);
+        writeDeviceSessionMarker(usernameLower);
+        setCloudUsername(cleanUsername);
+        return true;
+      } catch (error) {
+        const code = (error as { code?: string })?.code || '';
+        if (
+          code === 'auth/invalid-credential' ||
+          code === 'auth/user-not-found' ||
+          code === 'auth/wrong-password'
+        ) {
+          setAuthError(t.account.errInvalidCredentials);
+        } else if (code === 'auth/too-many-requests') {
+          setAuthError(t.account.errTooManyRequests);
+        } else if (code === 'auth/operation-not-allowed') {
+          setAuthError(t.account.errProviderDisabled);
+        } else if (code === 'auth/network-request-failed') {
+          setAuthError(t.account.errNetwork);
+        } else {
+          setAuthError(error instanceof Error ? error.message : t.account.errGenericLogin);
+        }
+        return false;
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [t]
+  );
 
   const saveGatheringToCloud = useCallback(
     async (gathering: Gathering) => {
@@ -314,8 +560,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       const ref = doc(db, 'users', user.uid, 'private', 'profile');
       try {
         const snap = await getDoc(ref);
+        const resolvedEmail =
+          cloudUserEmail ||
+          (user.email && !isInternalAuthEmail(user.email)
+            ? user.email
+            : 'sin-email@cuentasclaras.app');
         const payload = {
-          email: (user.email || 'sin-email@cuentasclaras.app').slice(0, 254),
           aliasOrCbu: paymentDetails.aliasOrCbu.slice(0, 120),
           accountHolder: paymentDetails.accountHolder.slice(0, 120),
           notifyEnabled: Boolean(notifyPrefs.notifyEnabled),
@@ -324,7 +574,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           updatedAt: serverTimestamp(),
         };
         if (!snap.exists()) {
-          await setDoc(ref, { ownerId: user.uid, ...payload });
+          await setDoc(ref, {
+            ownerId: user.uid,
+            email: resolvedEmail.slice(0, 254),
+            ...payload,
+          });
         } else {
           await updateDoc(ref, payload);
         }
@@ -332,7 +586,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         handleFirestoreError(error, OperationType.WRITE, path);
       }
     },
-    [user]
+    [user, cloudUserEmail]
   );
 
   const logNotificationToCloud = useCallback(
@@ -399,12 +653,15 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         authReady,
         isSigningIn,
         authError,
+        cloudUsername,
+        cloudUserEmail,
         cloudGatherings,
         cloudPaymentDetails,
         cloudNotifyPrefs,
         cloudNotifications,
-        signInWithGoogle,
-        signOutUser,
+        registerAccount,
+        loginWithUsername,
+        clearAuthError,
         saveGatheringToCloud,
         deleteGatheringFromCloud,
         savePrivateProfileToCloud,

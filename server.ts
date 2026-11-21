@@ -4,7 +4,7 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -72,7 +72,7 @@ const SERVER_ERRORS: Record<
     sampleNotFound: 'No se encontró la imagen del ticket de ejemplo.',
     missingImage: 'Falta la imagen del ticket o QR para escanear.',
     mapsKeyMissing: 'Falta configurar GOOGLE_MAPS_API_KEY en el servidor.',
-    missingLocation: 'Activá el GPS o ingresá tu ciudad para buscar lugares cercanos.',
+    missingLocation: 'Ingresá tu ciudad para buscar lugares y ofertas.',
     mapsQuotaExceeded: 'Se alcanzó el límite de consultas de Google Maps Platform.',
     nearbyFallbackError: 'No se pudieron consultar comercios cercanos en este momento.',
     geminiMissingOffers:
@@ -94,7 +94,7 @@ const SERVER_ERRORS: Record<
     sampleNotFound: 'Sample receipt image could not be found.',
     missingImage: 'Missing receipt or QR image to scan.',
     mapsKeyMissing: 'GOOGLE_MAPS_API_KEY is not configured on the server.',
-    missingLocation: 'Enable GPS or enter your city to search for nearby places.',
+    missingLocation: 'Enter your city to search for places and deals.',
     mapsQuotaExceeded: 'Google Maps Platform query quota limit reached.',
     nearbyFallbackError: 'Could not query nearby places at this moment.',
     geminiMissingOffers:
@@ -116,7 +116,7 @@ const SERVER_ERRORS: Record<
     sampleNotFound: 'L’image du ticket d’exemple est introuvable.',
     missingImage: 'Image du ticket ou du QR manquante pour la numérisation.',
     mapsKeyMissing: 'GOOGLE_MAPS_API_KEY n’est pas configurée sur le serveur.',
-    missingLocation: 'Activez le GPS ou saisissez votre ville pour rechercher des lieux à proximité.',
+    missingLocation: 'Saisissez votre ville pour rechercher des lieux et des offres.',
     mapsQuotaExceeded: 'Limite de requêtes Google Maps Platform atteinte.',
     nearbyFallbackError: 'Impossible de consulter les lieux à proximité pour le moment.',
     geminiMissingOffers:
@@ -137,7 +137,7 @@ const SERVER_ERRORS: Record<
     sampleNotFound: '未找到示例小票图片。',
     missingImage: '缺少要扫描的小票或二维码图片。',
     mapsKeyMissing: '服务器未配置 GOOGLE_MAPS_API_KEY。',
-    missingLocation: '请开启 GPS 或输入所在城市以搜索附近地点。',
+    missingLocation: '请输入所在城市以搜索地点和优惠。',
     mapsQuotaExceeded: '已达到 Google Maps Platform 查询配额上限。',
     nearbyFallbackError: '暂时无法查询附近商家。',
     geminiMissingOffers: '服务器未配置 GEMINI_API_KEY，无法联网搜索优惠。',
@@ -156,7 +156,7 @@ const SERVER_ERRORS: Record<
     sampleNotFound: 'Не удалось найти изображение примера чека.',
     missingImage: 'Отсутствует изображение чека или QR-кода для сканирования.',
     mapsKeyMissing: 'На сервере не настроен GOOGLE_MAPS_API_KEY.',
-    missingLocation: 'Включите GPS или введите ваш город для поиска мест поблизости.',
+    missingLocation: 'Введите ваш город для поиска заведений и акций.',
     mapsQuotaExceeded: 'Достигнут лимит запросов Google Maps Platform.',
     nearbyFallbackError: 'Не удалось получить список мест поблизости.',
     geminiMissingOffers:
@@ -226,6 +226,40 @@ function extractCityFromComponents(components?: AddressComponentLike[]): string 
     return `${locality}, ${province}`;
   }
   return locality || province || '';
+}
+
+function resolveCitySearchBias(rawCity: string): {
+  raw: string;
+  cityForGeocode: string;
+  cityForSearch: string;
+  prioritizeArgentina: boolean;
+} {
+  const clean = rawCity.trim();
+  if (!clean) {
+    return {
+      raw: '',
+      cityForGeocode: 'Argentina',
+      cityForSearch: 'Argentina',
+      prioritizeArgentina: true,
+    };
+  }
+
+  const hasExplicitForeignCountryOrUsState =
+    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|u\.s\.a\.?|united states|ee\.?\s*uu\.?|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
+      clean
+    ) || /,\s*(tx|ca|ny|fl|il|az|wa|nv|co|ma|ga|nc|oh|pa|mi)\b/i.test(clean);
+
+  const hasArgentina = /\bargentina\b/i.test(clean);
+  const prioritizeArgentina = !hasExplicitForeignCountryOrUsState;
+  const cityWithCountry =
+    prioritizeArgentina && !hasArgentina ? `${clean}, Argentina` : clean;
+
+  return {
+    raw: clean,
+    cityForGeocode: cityWithCountry,
+    cityForSearch: cityWithCountry,
+    prioritizeArgentina,
+  };
 }
 
 function resolveReceiptFile(relativePath: string): string | null {
@@ -493,6 +527,7 @@ Reglas estrictas:
       storeType = 'all',
       productCategory = 'all',
       openNowOnly = false,
+      customQuery = '',
       language,
     } = req.body as {
       lat?: number;
@@ -510,6 +545,7 @@ Reglas estrictas:
         | 'juegos_comida';
       productCategory?: 'all' | 'carnes' | 'refrescos' | 'helados' | 'panificados';
       openNowOnly?: boolean;
+      customQuery?: string;
       language?: string;
     };
 
@@ -535,14 +571,15 @@ Reglas estrictas:
       return;
     }
 
+    const cityBias = resolveCitySearchBias(trimmedCity);
     let centerCoords: { lat: number; lng: number } | null = hasCoords ? { lat: lat!, lng: lng! } : null;
     let resolvedCity = trimmedCity;
 
     try {
-      // Reverse or forward geocode to identify city & center coordinates
+      // Reverse or forward geocode to identify city & center coordinates (prioritizing Argentina unless another country is specified)
       const geocodeUrl = hasCoords
         ? `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`
-        : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(trimmedCity)}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
+        : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityBias.cityForGeocode)}${cityBias.prioritizeArgentina ? '&region=ar' : ''}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
 
       const geoRes = await fetch(geocodeUrl);
       if (geoRes.status === 429) {
@@ -641,19 +678,75 @@ Reglas estrictas:
       },
     };
 
-    const STORE_QUERIES: Record<StoreBucketKey, { label: string; query: string }> = {
-      restaurante: { label: STORE_LABELS_BY_LANG[lang].restaurante, query: 'restaurant dining food' },
-      restobar: { label: STORE_LABELS_BY_LANG[lang].restobar, query: 'restobar gastropub bar burgers beer' },
-      juegos_comida: { label: STORE_LABELS_BY_LANG[lang].juegos_comida, query: 'pool hall bowling arcade bar food games' },
-      carniceria: { label: STORE_LABELS_BY_LANG[lang].carniceria, query: 'butcher shop meat cuts carniceria' },
-      panaderia: { label: STORE_LABELS_BY_LANG[lang].panaderia, query: 'bakery bread pastries panaderia' },
-      supermercado: { label: STORE_LABELS_BY_LANG[lang].supermercado, query: 'supermarket grocery drinks' },
-      heladeria: { label: STORE_LABELS_BY_LANG[lang].heladeria, query: 'ice cream shop heladeria' },
+    const STORE_QUERIES_BY_LANG: Record<LangCode, Record<StoreBucketKey, string>> = {
+      es: {
+        restaurante: 'restaurante parrilla bodegon comida',
+        restobar: 'restobar bar tapas hamburguesas cerveza',
+        juegos_comida: 'pool billar arcade bowling juegos bar comida',
+        carniceria: 'carniceria cortes de carne',
+        panaderia: 'panaderia panificados facturas',
+        supermercado: 'supermercado bebidas ofertas',
+        heladeria: 'heladeria artesanal helados',
+      },
+      en: {
+        restaurante: 'restaurant dining food',
+        restobar: 'restobar gastropub bar burgers beer',
+        juegos_comida: 'pool hall billiards arcade bowling games bar',
+        carniceria: 'butcher shop meat cuts',
+        panaderia: 'bakery bread pastries',
+        supermercado: 'supermarket grocery drinks',
+        heladeria: 'ice cream shop gelato',
+      },
+      fr: {
+        restaurante: 'restaurant cuisine dîner',
+        restobar: 'resto-bar bar tapas bière burgers',
+        juegos_comida: 'billard pool salle arcade bowling bar jeux',
+        carniceria: 'boucherie viande',
+        panaderia: 'boulangerie pâtisserie pain',
+        supermercado: 'supermarché boissons courses',
+        heladeria: 'glacier glace artisanale',
+      },
+      zh: {
+        restaurante: '餐厅 美食 聚餐',
+        restobar: '餐酒吧 精酿啤酒 汉堡 小吃',
+        juegos_comida: '台球 桌球 电玩城 游戏厅 保龄球 酒吧',
+        carniceria: '肉铺 鲜肉 牛排',
+        panaderia: '面包店 烘焙 糕点',
+        supermercado: '超市 饮料 生鲜',
+        heladeria: '冰淇淋店 甜品',
+      },
+      ru: {
+        restaurante: 'ресторан ужин еда',
+        restobar: 'рестобар бар крафтовое пиво бургеры',
+        juegos_comida: 'бильярд пул аркада игровые автоматы боулинг бар',
+        carniceria: 'мясная лавка мясо стейки',
+        panaderia: 'пекарня выпечка хлеб',
+        supermercado: 'супермаркет напитки продукты',
+        heladeria: 'кафе-мороженое джелато',
+      },
     };
+
+    const STORE_QUERIES: Record<StoreBucketKey, { label: string; query: string }> = {
+      restaurante: { label: STORE_LABELS_BY_LANG[lang].restaurante, query: STORE_QUERIES_BY_LANG[lang].restaurante },
+      restobar: { label: STORE_LABELS_BY_LANG[lang].restobar, query: STORE_QUERIES_BY_LANG[lang].restobar },
+      juegos_comida: { label: STORE_LABELS_BY_LANG[lang].juegos_comida, query: STORE_QUERIES_BY_LANG[lang].juegos_comida },
+      carniceria: { label: STORE_LABELS_BY_LANG[lang].carniceria, query: STORE_QUERIES_BY_LANG[lang].carniceria },
+      panaderia: { label: STORE_LABELS_BY_LANG[lang].panaderia, query: STORE_QUERIES_BY_LANG[lang].panaderia },
+      supermercado: { label: STORE_LABELS_BY_LANG[lang].supermercado, query: STORE_QUERIES_BY_LANG[lang].supermercado },
+      heladeria: { label: STORE_LABELS_BY_LANG[lang].heladeria, query: STORE_QUERIES_BY_LANG[lang].heladeria },
+    };
+
+    const trimmedQuery = (customQuery || '').trim();
+    const isGamesQuery =
+      /\b(pool|billar|billiards|arcade|bowling|boliche|fichas?|metegol|flipper|ping\s*pong|juegos?|games?|snooker|dardos|laser|fichines)\b/i.test(
+        trimmedQuery
+      );
 
     let bucketsToSearch: StoreBucketKey[];
     if (storeType !== 'all' && storeType in STORE_QUERIES) {
       bucketsToSearch = [storeType];
+    } else if (mode === 'salidas' && isGamesQuery) {
+      bucketsToSearch = ['juegos_comida', 'restobar'];
     } else if (mode === 'salidas') {
       bucketsToSearch = ['restaurante', 'restobar', 'juegos_comida'];
     } else if (productCategory === 'carnes') {
@@ -751,16 +844,38 @@ Reglas estrictas:
     try {
       const searchPromises = bucketsToSearch.map(async (bucket) => {
         const meta = STORE_QUERIES[bucket];
+        const useUserQueryInPlaces =
+          Boolean(trimmedQuery) &&
+          (storeType === bucket ||
+            bucket === 'juegos_comida' ||
+            (!isGamesQuery && mode === 'salidas'));
+        const baseTopic = useUserQueryInPlaces ? `${trimmedQuery} ${meta.query}` : meta.query;
+        const locationTextForPlaces = cityBias.prioritizeArgentina
+          ? /\bargentina\b/i.test(resolvedCity)
+            ? resolvedCity
+            : `${resolvedCity || trimmedCity}, Argentina`
+          : resolvedCity || cityBias.cityForSearch;
         const queryText =
-          (!centerCoords || !hasCoords) && resolvedCity
-            ? `${meta.query} ${resolvedCity}`
-            : meta.query;
+          !hasCoords && locationTextForPlaces
+            ? `${baseTopic} ${locationTextForPlaces}`
+            : baseTopic;
+
+        const pageSize =
+          bucketsToSearch.length === 1
+            ? 10
+            : isGamesQuery && bucket === 'juegos_comida'
+              ? 8
+              : 4;
 
         const body: Record<string, unknown> = {
           textQuery: queryText,
           languageCode: mapsLang,
-          pageSize: bucketsToSearch.length === 1 ? 10 : 4,
+          pageSize,
         };
+
+        if (cityBias.prioritizeArgentina) {
+          body.regionCode = 'AR';
+        }
 
         if (openNowOnly) {
           body.openNow = true;
@@ -773,7 +888,7 @@ Reglas estrictas:
                 latitude: centerCoords.lat,
                 longitude: centerCoords.lng,
               },
-              radius: 7500.0,
+              radius: 10000.0,
             },
           };
         }
@@ -882,16 +997,40 @@ Reglas estrictas:
           };
         })
         .sort((a, b) => {
+          if (trimmedQuery) {
+            const tokens = trimmedQuery
+              .toLowerCase()
+              .split(/\s+/)
+              .filter((w) => w.length >= 3);
+            const scorePlace = (item: { name: string; storeType: string; storeTypeLabel: string }) => {
+              const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
+              let score = 0;
+              for (const tok of tokens) {
+                if (hay.includes(tok)) score += 3;
+              }
+              if (isGamesQuery && item.storeType === 'juegos_comida') score += 2;
+              return score;
+            };
+            const diff = scorePlace(b) - scorePlace(a);
+            if (diff !== 0) return diff;
+          }
           if (a.distanceMeters !== null && b.distanceMeters !== null) {
             return a.distanceMeters - b.distanceMeters;
           }
           return (b.rating || 0) - (a.rating || 0);
         });
 
+      const inRegionPlaces = centerCoords
+        ? normalizedPlaces.filter(
+            (p) => p.distanceMeters === null || p.distanceMeters <= 85000
+          )
+        : normalizedPlaces;
+      const finalPlaces = inRegionPlaces.length > 0 ? inRegionPlaces : normalizedPlaces;
+
       res.json({
         city: resolvedCity || errMsgs.defaultArea,
         center: centerCoords,
-        places: normalizedPlaces,
+        places: finalPlaces,
       });
     } catch (error) {
       const errObj = error as { quotaExceeded?: boolean; message?: string };
@@ -949,7 +1088,8 @@ Reglas estrictas:
       return;
     }
 
-    const targetCity = (city || '').trim() || 'Argentina';
+    const cityBias = resolveCitySearchBias(city || '');
+    const targetCity = cityBias.cityForSearch || 'Argentina';
 
     const PRODUCT_LABELS: Record<string, string> = {
       all: 'meat cuts for barbecue/grill, soft drinks/sodas, ice cream, and bread/pastries',
@@ -989,7 +1129,10 @@ Reglas estrictas:
             .join('\n')}`
         : '';
 
-    const userFilter = customQuery.trim() ? `\nSpecific user search filter: "${customQuery.trim()}".` : '';
+    const trimmedCustomQuery = customQuery.trim();
+    const userFilter = trimmedCustomQuery
+      ? `\nPrimary user search query: "${trimmedCustomQuery}". Prioritize deals, rates, and venues matching this search!`
+      : '';
 
     const isSalidasFocus =
       mode === 'salidas' ||
@@ -997,19 +1140,35 @@ Reglas estrictas:
       storeType === 'restobar' ||
       storeType === 'juegos_comida';
 
-    const offerPrompt = isSalidasFocus
-      ? `Search the web for current information in ${targetCity} about dining deals (daily menus, happy hour, 2-for-1 deals, bank or digital wallet discounts) and food or game prices (e.g., per-hour/token pool table rates, bowling, arcade, board games) for ${STORE_LABELS[storeType] || STORE_LABELS.all}.${userFilter}${venueListText}
+    const isGameOfferFocus =
+      storeType === 'juegos_comida' ||
+      /\b(pool|billar|billiards|arcade|bowling|boliche|fichas?|metegol|flipper|ping\s*pong|juegos?|games?|snooker|dardos|fichines)\b/i.test(
+        trimmedCustomQuery
+      );
 
-IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
+    const poolArcadeInstruction = isGameOfferFocus
+      ? `\nSpecific Pool & Arcade Game Offers Search Strategy for ${targetCity}:
+- Search specifically for game promos & tariffs matching "${trimmedCustomQuery || 'pool, arcade, bowling, juegos'}" in ${targetCity} and at the listed venues above:
+  * Pool/Billiards: hourly table price, half-hour or per-game rate, 2-for-1 / happy hour table promos, weekday discounts, and "pool + drinks/food" combos.
+  * Arcades: token or game-card prices, bonus credit recharge promos (e.g., load X get Y bonus, 2x1 on games), timed unlimited-play passes, and group/birthday packages.
+  * Bowling / other queried games: lane/hour prices, group combos.
+- Populate "gameOffers" with concrete game promotions/combos/happy-hour discounts found for each venue, and "gamePrices" with published numeric tariffs (or clear game list + on-site pricing note if no rate is online).`
+      : '';
+
+    const offerPrompt = isSalidasFocus
+      ? `Search the web for current information in ${targetCity} about dining deals (daily menus, happy hour, 2-for-1 deals, bank or digital wallet discounts) and game deals/prices (pool tables per hour/match, arcade tokens/cards/bonus promos, bowling, board games) for ${STORE_LABELS[storeType] || STORE_LABELS.all}.${userFilter}${venueListText}${poolArcadeInstruction}
+
+IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gameOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
 Respond ONLY with a valid JSON object (no surrounding prose or code fences) matching this exact schema:
 {
-  "citySummaryMarkdown": "Brief markdown summary in ${outputLangName} with bullet points of food deals and game rates found in ${targetCity}",
+  "citySummaryMarkdown": "Structured markdown summary in ${outputLangName} tailored to the search (${trimmedCustomQuery || STORE_LABELS[storeType] || 'hangouts & games'}), with ## sections and bullet points of food deals, pool/arcade promotions, and published game rates in ${targetCity}",
   "venues": [
     {
       "name": "Exact name of one of the venues listed above if info was found",
-      "foodOffers": ["Food deal or promo found on the web, written in ${outputLangName}"],
+      "foodOffers": ["Food or drink deal/combo found on the web, written in ${outputLangName}"],
       "hasGames": true,
-      "gamePrices": ["Published game rate found (e.g. Pool $X/hour) or clear note if games are offered without an online price, written in ${outputLangName}"],
+      "gameOffers": ["Pool, arcade, or bowling deal/promo/happy-hour/combo found for this venue or matching search, written in ${outputLangName}"],
+      "gamePrices": ["Published game rate found (e.g. Pool $X/hour, Arcade card/token $Y) or note of available games if tariff is confirmed on-site, written in ${outputLangName}"],
       "estimatedFoodPerPerson": null,
       "estimatedGamePerSession": null,
       "priceNote": "Brief reference or source note in ${outputLangName}"
@@ -1018,11 +1177,12 @@ Respond ONLY with a valid JSON object (no surrounding prose or code fences) matc
 }
 
 Strict rules:
-1. DO NOT invent prices or promotions. If Google Search does not return an exact published numeric price for a venue or game, leave estimatedFoodPerPerson and/or estimatedGamePerSession as null and explain in priceNote or gamePrices.
-2. If a venue on the list mentions pool tables, bowling, or games without an online rate, set hasGames: true and state in gamePrices which games it has and that pricing is confirmed on-site.`
+1. Base both citySummaryMarkdown and venue details directly on the user's search ("${trimmedCustomQuery || storeType}") and the listed venues in ${targetCity}.
+2. DO NOT invent prices or promotions. If Google Search does not return an exact published numeric price for a venue or game, leave estimatedFoodPerPerson and/or estimatedGamePerSession as null and explain clearly in priceNote or gamePrices.
+3. If a venue on the list mentions pool tables, arcades, bowling, or games without an online rate, set hasGames: true and state in gamePrices which games it offers and that rates are confirmed on-site.`
       : `Search the web for current deals, supermarket promotions, bank or digital wallet discounts, and promotional prices in ${targetCity} for buying ${PRODUCT_LABELS[productCategory] || PRODUCT_LABELS.all} at ${STORE_LABELS[storeType] || STORE_LABELS.all}.${userFilter}${venueListText}
 
-IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
+IMPORTANT: Write all human-readable text fields ("citySummaryMarkdown", "foodOffers", "gameOffers", "gamePrices", "priceNote") strictly in ${outputLangName}.
 Respond ONLY with a valid JSON object (no surrounding prose or code fences) matching this exact schema:
 {
   "citySummaryMarkdown": "Structured summary in ${outputLangName} using ## headings and concrete bullet points (store/chain, active promo or discount, valid days and cap if applicable)",
@@ -1031,6 +1191,7 @@ Respond ONLY with a valid JSON object (no surrounding prose or code fences) matc
       "name": "Exact name of one of the stores listed above if a deal was found",
       "foodOffers": ["Active promo or applicable bank discount, written in ${outputLangName}"],
       "hasGames": false,
+      "gameOffers": [],
       "gamePrices": [],
       "estimatedFoodPerPerson": null,
       "estimatedGamePerSession": null,
@@ -1045,6 +1206,7 @@ Strict rule: Do not invent stores or prices if they do not appear in the web sea
       name: string;
       foodOffers: string[];
       hasGames: boolean;
+      gameOffers: string[];
       gamePrices: string[];
       estimatedFoodPerPerson: number | null;
       estimatedGamePerSession: number | null;
@@ -1059,6 +1221,7 @@ Strict rule: Do not invent stores or prices if they do not appear in the web sea
           contents: offerPrompt,
           config: {
             tools: [{ googleSearch: {} }],
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           },
         });
       } catch (primaryErr) {
@@ -1102,6 +1265,7 @@ Strict rule: Do not invent stores or prices if they do not appear in the web sea
               name: String(v.name || '').trim(),
               foodOffers: Array.isArray(v.foodOffers) ? v.foodOffers.map(String).filter(Boolean) : [],
               hasGames: Boolean(v.hasGames),
+              gameOffers: Array.isArray(v.gameOffers) ? v.gameOffers.map(String).filter(Boolean) : [],
               gamePrices: Array.isArray(v.gamePrices) ? v.gamePrices.map(String).filter(Boolean) : [],
               estimatedFoodPerPerson:
                 typeof v.estimatedFoodPerPerson === 'number' && Number.isFinite(v.estimatedFoodPerPerson)
