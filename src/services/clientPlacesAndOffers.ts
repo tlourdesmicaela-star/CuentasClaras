@@ -461,6 +461,40 @@ function getBucketsToSearch(
   return ['carniceria', 'panaderia', 'supermercado', 'heladeria'];
 }
 
+const NON_SALIDAS_BUCKETS = new Set<StoreBucketType>([
+  'carniceria',
+  'panaderia',
+  'supermercado',
+  'heladeria',
+]);
+
+const GAME_KEYWORD_REGEX =
+  /\b(pool|billar|billiards|arcade|bowling|boliche|fichines|juegos|games|snooker|metegol|flipper|ping\s*pong|dardos)\b/i;
+
+function isNonGameNoiseVenue(osmCategory: string, osmType: string, nameLower: string): boolean {
+  const cat = osmCategory.toLowerCase();
+  const typ = osmType.toLowerCase();
+  if (
+    typ === 'ice_cream' ||
+    typ === 'swimming_pool' ||
+    typ === 'water_park' ||
+    typ === 'lottery' ||
+    typ === 'butcher' ||
+    typ === 'bakery' ||
+    typ === 'pastry' ||
+    typ === 'supermarket' ||
+    typ === 'convenience' ||
+    typ === 'grocery'
+  ) {
+    return !GAME_KEYWORD_REGEX.test(nameLower);
+  }
+  if (cat === 'shop' && typ === 'ice_cream') return true;
+  if (/\b(helader[ií]a|helados|gelato|ice\s*cream|piscina|natatorio)\b/i.test(nameLower)) {
+    return !GAME_KEYWORD_REGEX.test(nameLower);
+  }
+  return false;
+}
+
 function classifyNominatimRow(
   row: NominatimRow,
   fallbackBucket: StoreBucketType
@@ -469,24 +503,27 @@ function classifyNominatimRow(
   const type = (row.type || '').toLowerCase();
   const nameLower = (row.name || row.display_name || '').toLowerCase();
 
-  if (
-    type === 'bowling_alley' ||
-    type === 'amusement_arcade' ||
-    type === 'adult_gaming_centre' ||
-    /\b(pool|billar|billiards|arcade|bowling|boliche|fichines|juegos|snooker)\b/i.test(nameLower)
-  ) {
-    return 'juegos_comida';
-  }
-  if (cat === 'amenity' && (type === 'bar' || type === 'pub' || type === 'biergarten')) {
-    return 'restobar';
-  }
+  if ((cat === 'amenity' || cat === 'shop') && type === 'ice_cream') return 'heladeria';
   if (cat === 'shop' && type === 'butcher') return 'carniceria';
   if (cat === 'shop' && (type === 'bakery' || type === 'pastry')) return 'panaderia';
   if (cat === 'shop' && (type === 'supermarket' || type === 'convenience' || type === 'grocery')) {
     return 'supermercado';
   }
-  if ((cat === 'amenity' || cat === 'shop') && type === 'ice_cream') return 'heladeria';
-  if (cat === 'amenity' && (type === 'restaurant' || type === 'fast_food' || type === 'cafe')) {
+
+  if (
+    type === 'bowling_alley' ||
+    type === 'amusement_arcade' ||
+    type === 'adult_gaming_centre' ||
+    type === 'billiards' ||
+    (cat === 'shop' && type === 'games') ||
+    GAME_KEYWORD_REGEX.test(nameLower)
+  ) {
+    return 'juegos_comida';
+  }
+  if (cat === 'amenity' && (type === 'bar' || type === 'pub' || type === 'biergarten' || type === 'nightclub')) {
+    return 'restobar';
+  }
+  if (cat === 'amenity' && (type === 'restaurant' || type === 'fast_food' || type === 'cafe' || type === 'food_court')) {
     return fallbackBucket === 'restobar' ? 'restobar' : 'restaurante';
   }
   return fallbackBucket;
@@ -534,6 +571,30 @@ export async function searchNearbyPlacesClient(params: {
   const collected: NearbyPlace[] = [];
   const seenKeys = new Set<string>();
 
+  const isBucketCompatible = (
+    bucket: StoreBucketType,
+    rawName: string,
+    osmCategory = '',
+    osmType = ''
+  ): boolean => {
+    const nameLower = rawName.toLowerCase();
+    if (storeType === 'juegos_comida') {
+      if (isNonGameNoiseVenue(osmCategory, osmType, nameLower)) return false;
+      return bucket === 'juegos_comida';
+    }
+    if (storeType !== 'all') {
+      if (mode === 'salidas' && NON_SALIDAS_BUCKETS.has(bucket)) return false;
+      return bucket === storeType;
+    }
+    if (mode === 'salidas') {
+      if (NON_SALIDAS_BUCKETS.has(bucket)) return false;
+      if (isGamesQuery) {
+        return bucket === 'juegos_comida' || bucket === 'restobar';
+      }
+    }
+    return bucketsToSearch.includes(bucket);
+  };
+
   const addNominatimRows = (rows: NominatimRow[], fallbackBucket: StoreBucketType) => {
     for (const row of rows) {
       const osmKey = row.osm_type && row.osm_id ? `${row.osm_type}-${row.osm_id}` : `nom-${row.place_id}`;
@@ -541,6 +602,11 @@ export async function searchNearbyPlacesClient(params: {
       if (!rawName) continue;
       // Skip administrative city boundary entries themselves
       if (row.category === 'boundary' || ['city', 'town', 'village', 'municipality'].includes(row.type || '')) {
+        continue;
+      }
+
+      const bucket = classifyNominatimRow(row, fallbackBucket);
+      if (!isBucketCompatible(bucket, rawName, row.category || '', row.type || '')) {
         continue;
       }
 
@@ -561,7 +627,6 @@ export async function searchNearbyPlacesClient(params: {
         continue;
       }
 
-      const bucket = classifyNominatimRow(row, fallbackBucket);
       const addr = row.address || {};
       const streetLine = [addr.road, addr.house_number].filter(Boolean).join(' ');
       const areaLine = addr.suburb || addr.neighbourhood || addr.city || addr.town || '';
@@ -620,7 +685,12 @@ export async function searchNearbyPlacesClient(params: {
   const tagQueriesByBucket: Record<StoreBucketType, string[]> = {
     restaurante: ['[amenity=restaurant]'],
     restobar: ['[amenity=bar]', '[amenity=pub]'],
-    juegos_comida: ['[leisure=bowling_alley]', '[leisure=amusement_arcade]', 'pool billar'],
+    juegos_comida: [
+      '[leisure=bowling_alley]',
+      '[leisure=amusement_arcade]',
+      '[sport=billiards]',
+      'billar bowling arcade',
+    ],
     carniceria: ['[shop=butcher]'],
     panaderia: ['[shop=bakery]'],
     supermercado: ['[shop=supermarket]'],
@@ -652,6 +722,9 @@ export async function searchNearbyPlacesClient(params: {
       if ((bucketsToSearch.length === 1 || bucket === 'juegos_comida') && queries[1]) {
         tasks.push({ q: queries[1], bucket, limit: 8, bounded: true });
       }
+      if (bucket === 'juegos_comida' && queries[2]) {
+        tasks.push({ q: queries[2], bucket, limit: 8, bounded: true });
+      }
     } else {
       tasks.push({
         q: `${labels[bucket]} ${displayCity}`,
@@ -662,8 +735,9 @@ export async function searchNearbyPlacesClient(params: {
     }
   }
 
-  // Execute max 3 Nominatim queries politely to stay well within fair-use limits
-  for (const t of tasks.slice(0, 3)) {
+  // Execute max 3-4 Nominatim queries politely to stay well within fair-use limits
+  const maxNomTasks = storeType === 'juegos_comida' ? 4 : 3;
+  for (const t of tasks.slice(0, maxNomTasks)) {
     await runNominatimQuery(t.q, t.bucket, t.limit, t.bounded);
   }
 
@@ -680,6 +754,9 @@ export async function searchNearbyPlacesClient(params: {
     'bowling_alley',
     'amusement_arcade',
     'adult_gaming_centre',
+    'billiards',
+    'games',
+    'sports_centre',
     'butcher',
     'bakery',
     'pastry',
@@ -695,24 +772,26 @@ export async function searchNearbyPlacesClient(params: {
     const osmKey = (p.osm_key || '').toLowerCase();
     const osmVal = (p.osm_value || '').toLowerCase();
     const nameLower = (p.name || '').toLowerCase();
-    if (!['amenity', 'shop', 'leisure'].includes(osmKey) || !ALLOWED_POI_VALUES.has(osmVal)) {
+    if (!['amenity', 'shop', 'leisure', 'sport'].includes(osmKey) || !ALLOWED_POI_VALUES.has(osmVal)) {
       return null;
     }
-    if (
-      osmVal === 'bowling_alley' ||
-      osmVal === 'amusement_arcade' ||
-      osmVal === 'adult_gaming_centre' ||
-      /\b(pool|billar|billiards|arcade|bowling|boliche|fichines|juegos|snooker)\b/i.test(nameLower)
-    ) {
-      return 'juegos_comida';
-    }
-    if (osmVal === 'bar' || osmVal === 'pub' || osmVal === 'biergarten') return 'restobar';
+    if (osmVal === 'ice_cream') return 'heladeria';
     if (osmVal === 'butcher') return 'carniceria';
     if (osmVal === 'bakery' || osmVal === 'pastry') return 'panaderia';
     if (osmVal === 'supermarket' || osmVal === 'convenience' || osmVal === 'grocery') {
       return 'supermercado';
     }
-    if (osmVal === 'ice_cream') return 'heladeria';
+    if (
+      osmVal === 'bowling_alley' ||
+      osmVal === 'amusement_arcade' ||
+      osmVal === 'adult_gaming_centre' ||
+      osmVal === 'billiards' ||
+      (osmKey === 'shop' && osmVal === 'games') ||
+      GAME_KEYWORD_REGEX.test(nameLower)
+    ) {
+      return 'juegos_comida';
+    }
+    if (osmVal === 'bar' || osmVal === 'pub' || osmVal === 'biergarten') return 'restobar';
     if (osmVal === 'restaurant' || osmVal === 'fast_food' || osmVal === 'cafe' || osmVal === 'food_court') {
       if (/\b(resto\s*bar|restobar|pub|cervecer[ií]a|brewery)\b/i.test(nameLower)) {
         return 'restobar';
@@ -747,9 +826,11 @@ export async function searchNearbyPlacesClient(params: {
         );
       } else if (bucket === 'juegos_comida') {
         photonSpecs.push(
-          { q: 'pool', bucket },
           { q: 'bowling', osmTag: 'leisure:bowling_alley', bucket },
-          { q: 'arcade', osmTag: 'leisure:amusement_arcade', bucket }
+          { q: 'arcade', osmTag: 'leisure:amusement_arcade', bucket },
+          { q: 'billar', bucket },
+          { q: 'pool', osmTag: 'amenity:bar', bucket },
+          { q: 'juegos', bucket }
         );
       } else if (bucket === 'carniceria') {
         photonSpecs.push(
@@ -778,12 +859,13 @@ export async function searchNearbyPlacesClient(params: {
     const latLonBias = geo.center ? `&lat=${geo.center.lat}&lon=${geo.center.lng}` : '';
     const cityHead = displayCity.split(',')[0].trim();
 
-    // Limit to 3 concise bounded Photon requests to avoid throttling
+    // Limit to 3-4 concise bounded Photon requests to avoid throttling
+    const maxPhotonSpecs = storeType === 'juegos_comida' ? 4 : 3;
     const uniqueSpecs: typeof photonSpecs = [];
     const seenBuckets = new Set<string>();
     for (const s of photonSpecs) {
-      if (uniqueSpecs.length >= 3) break;
-      const key = `${s.bucket}|${s.q}`;
+      if (uniqueSpecs.length >= maxPhotonSpecs) break;
+      const key = `${s.bucket}|${s.q}|${s.osmTag || ''}`;
       if (!seenBuckets.has(key)) {
         seenBuckets.add(key);
         uniqueSpecs.push(s);
@@ -807,7 +889,9 @@ export async function searchNearbyPlacesClient(params: {
             if (!name || !feat.geometry?.coordinates) continue;
             const bucket = classifyPhotonPoi(p, spec.bucket);
             if (!bucket) continue;
-            if (storeType !== 'all' && bucket !== storeType && !isGamesQuery) continue;
+            if (!isBucketCompatible(bucket, name, p.osm_key || '', p.osm_value || '')) {
+              continue;
+            }
 
             const [pLng, pLat] = feat.geometry.coordinates;
             if (!Number.isFinite(pLat) || !Number.isFinite(pLng)) continue;
@@ -854,25 +938,28 @@ export async function searchNearbyPlacesClient(params: {
     );
   }
 
-  // Sort by user query match + distance
+  // Sort by user query match + explicit games priority + distance
   collected.sort((a, b) => {
-    if (trimmedQuery) {
-      const tokens = trimmedQuery
-        .toLowerCase()
-        .split(/\s+/)
-        .filter((w) => w.length >= 3);
-      const scorePlace = (item: NearbyPlace) => {
-        const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
-        let score = 0;
+    const scorePlace = (item: NearbyPlace) => {
+      const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
+      let score = 0;
+      if (trimmedQuery) {
+        const tokens = trimmedQuery
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length >= 3);
         for (const tok of tokens) {
           if (hay.includes(tok)) score += 3;
         }
-        if (isGamesQuery && item.storeType === 'juegos_comida') score += 2;
-        return score;
-      };
-      const diff = scorePlace(b) - scorePlace(a);
-      if (diff !== 0) return diff;
-    }
+      }
+      if (storeType === 'juegos_comida' || isGamesQuery) {
+        if (GAME_KEYWORD_REGEX.test(item.name)) score += 4;
+        if (item.storeType === 'juegos_comida') score += 2;
+      }
+      return score;
+    };
+    const diff = scorePlace(b) - scorePlace(a);
+    if (diff !== 0) return diff;
     if (a.distanceMeters !== null && b.distanceMeters !== null) {
       return a.distanceMeters - b.distanceMeters;
     }

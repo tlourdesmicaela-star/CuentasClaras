@@ -980,25 +980,47 @@ Reglas estrictas:
       return `https://www.openstreetmap.org/search?query=${encodeURIComponent(loc)}`;
     };
 
+    const GAME_NAME_REGEX =
+      /\b(pool|billar|billiards|arcade|bowling|boliche|fichines|juegos|games|snooker|metegol|flipper|ping\s*pong|dardos)\b/i;
+
+    const isNonSalidasTypeOrName = (typeStr: string, nameStr: string): boolean => {
+      const tLower = typeStr.toLowerCase();
+      const nLower = nameStr.toLowerCase();
+      if (GAME_NAME_REGEX.test(nLower)) return false;
+      if (
+        ['ice_cream', 'ice_cream_shop', 'butcher', 'butcher_shop', 'bakery', 'pastry', 'supermarket', 'grocery_store', 'convenience_store', 'convenience', 'grocery', 'swimming_pool', 'water_park', 'lottery'].includes(
+          tLower
+        )
+      ) {
+        return true;
+      }
+      return /\b(helader[ií]a|helados|gelato|ice\s*cream|carnicer[ií]a|panader[ií]a|supermercado)\b/i.test(
+        nLower
+      );
+    };
+
     const sortNormalizedPlaces = (items: NormalizedPlace[]): NormalizedPlace[] =>
       items.sort((a, b) => {
-        if (trimmedQuery) {
-          const tokens = trimmedQuery
-            .toLowerCase()
-            .split(/\s+/)
-            .filter((w) => w.length >= 3);
-          const scorePlace = (item: { name: string; storeType: string; storeTypeLabel: string }) => {
-            const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
-            let score = 0;
+        const scorePlace = (item: { name: string; storeType: string; storeTypeLabel: string }) => {
+          const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
+          let score = 0;
+          if (trimmedQuery) {
+            const tokens = trimmedQuery
+              .toLowerCase()
+              .split(/\s+/)
+              .filter((w) => w.length >= 3);
             for (const tok of tokens) {
               if (hay.includes(tok)) score += 3;
             }
-            if (isGamesQuery && item.storeType === 'juegos_comida') score += 2;
-            return score;
-          };
-          const diff = scorePlace(b) - scorePlace(a);
-          if (diff !== 0) return diff;
-        }
+          }
+          if (storeType === 'juegos_comida' || isGamesQuery) {
+            if (GAME_NAME_REGEX.test(item.name)) score += 4;
+            if (item.storeType === 'juegos_comida') score += 2;
+          }
+          return score;
+        };
+        const diff = scorePlace(b) - scorePlace(a);
+        if (diff !== 0) return diff;
         if (a.distanceMeters !== null && b.distanceMeters !== null) {
           return a.distanceMeters - b.distanceMeters;
         }
@@ -1281,6 +1303,8 @@ Reglas estrictas:
                 place_id: number;
                 osm_type?: string;
                 osm_id?: number;
+                category?: string;
+                type?: string;
                 lat: string;
                 lon: string;
                 name?: string;
@@ -1289,6 +1313,12 @@ Reglas estrictas:
               for (const row of rows) {
                 const name = (row.name || row.display_name?.split(',')[0] || '').trim();
                 if (!name) continue;
+                if (
+                  (storeType === 'juegos_comida' || mode === 'salidas') &&
+                  isNonSalidasTypeOrName(row.type || '', name)
+                ) {
+                  continue;
+                }
                 const id = `nom-${row.place_id}`;
                 if (seenOsmIds.has(id)) continue;
                 seenOsmIds.add(id);
@@ -1564,6 +1594,13 @@ Reglas estrictas:
             flat
               .filter(({ place }) => {
                 if (!place.id || seenIds.has(place.id)) return false;
+                const pName = place.displayName?.text || '';
+                if (
+                  (storeType === 'juegos_comida' || mode === 'salidas') &&
+                  isNonSalidasTypeOrName(place.primaryType || '', pName)
+                ) {
+                  return false;
+                }
                 seenIds.add(place.id);
                 return true;
               })
