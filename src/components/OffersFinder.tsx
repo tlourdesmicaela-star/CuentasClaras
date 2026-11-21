@@ -32,109 +32,27 @@ import {
 import type { ExpenseCategory, Participant } from '../types/expense';
 import { formatCurrency } from '../utils/currency';
 import { useLanguage } from '../contexts/LanguageContext';
+import {
+  buildClientMapsSearchUrl,
+  buildClientOffersFallback,
+  buildClientOsmSearchUrl,
+  searchNearbyPlacesClient,
+  type GroundingSource,
+  type NearbyPlace,
+  type OfferProductCategory,
+  type OfferStoreType,
+  type SearchMode,
+  type StoreBucketType,
+  type VenueEnrichment,
+} from '../services/clientPlacesAndOffers';
 
-export type SearchMode = 'salidas' | 'compras';
-export type OfferProductCategory = 'all' | 'carnes' | 'refrescos' | 'helados' | 'panificados';
-export type StoreBucketType =
-  | 'carniceria'
-  | 'panaderia'
-  | 'supermercado'
-  | 'heladeria'
-  | 'restaurante'
-  | 'restobar'
-  | 'juegos_comida';
-export type OfferStoreType = 'all' | StoreBucketType;
-
-interface NearbyPlace {
-  id: string;
-  name: string;
-  storeType: StoreBucketType;
-  storeTypeLabel: string;
-  address: string;
-  lat: number | null;
-  lng: number | null;
-  distanceMeters: number | null;
-  rating: number | null;
-  userRatingCount: number | null;
-  openNow: boolean | null;
-  priceLevelLabel: string | null;
-  priceRange: {
-    currencyCode: string;
-    startUnits: number | null;
-    endUnits: number | null;
-  } | null;
-  googleMapsUri: string;
-  osmUri?: string | null;
-  websiteUri: string | null;
-}
-
-function buildClientMapsSearchUrl(
-  city: string,
-  mode: SearchMode,
-  storeType: OfferStoreType,
-  customQuery: string
-): string {
-  const trimmed = customQuery.trim();
-  const topicParts: string[] = [];
-  if (trimmed) topicParts.push(trimmed);
-  if (storeType !== 'all') {
-    const labelMap: Record<StoreBucketType, string> = {
-      restaurante: 'restaurantes',
-      restobar: 'restobares',
-      juegos_comida: 'pool billar arcade bowling',
-      carniceria: 'carnicerias',
-      panaderia: 'panaderias',
-      supermercado: 'supermercados',
-      heladeria: 'heladerias',
-    };
-    topicParts.push(labelMap[storeType]);
-  } else if (!trimmed) {
-    topicParts.push(
-      mode === 'salidas'
-        ? 'restaurantes restobares pool juegos'
-        : 'carnicerias panaderias supermercados heladerias'
-    );
-  }
-  const cleanCity = city.trim() || 'Argentina';
-  const hasForeignCountry =
-    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|united states|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
-      cleanCity
-    ) || /,\s*(tx|ca|ny|fl|il|az|wa|nv|co|ma|ga|nc|oh|pa|mi)\b/i.test(cleanCity);
-  const loc =
-    !hasForeignCountry && !/\bargentina\b/i.test(cleanCity)
-      ? `${cleanCity}, Argentina`
-      : cleanCity;
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${topicParts.join(' ')} ${loc}`.trim())}`;
-}
-
-function buildClientOsmSearchUrl(city: string): string {
-  const cleanCity = city.trim() || 'Argentina';
-  const hasForeignCountry =
-    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|united states|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
-      cleanCity
-    );
-  const loc =
-    !hasForeignCountry && !/\bargentina\b/i.test(cleanCity)
-      ? `${cleanCity}, Argentina`
-      : cleanCity;
-  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(loc)}`;
-}
-
-interface VenueEnrichment {
-  name: string;
-  foodOffers: string[];
-  hasGames: boolean;
-  gameOffers?: string[];
-  gamePrices: string[];
-  estimatedFoodPerPerson: number | null;
-  estimatedGamePerSession: number | null;
-  priceNote: string;
-}
-
-interface GroundingSource {
-  title: string;
-  uri: string;
-}
+export type {
+  NearbyPlace,
+  OfferProductCategory,
+  OfferStoreType,
+  SearchMode,
+  StoreBucketType,
+};
 
 interface VenueCalcState {
   foodMode: 'per_person' | 'table_total';
@@ -447,18 +365,30 @@ export function OffersFinder({
   // Per-venue calculator state & expanded cards (Record instead of Map to avoid GoogleMap shadowing)
   const [calcByPlace, setCalcByPlace] = useState<Record<string, VenueCalcState>>({});
   const [expandedCalcIds, setExpandedCalcIds] = useState<Record<string, boolean>>({});
+  const backendApiAvailableRef = useRef<boolean | null>(
+    import.meta.env.VITE_STATIC_ONLY === 'true' ? false : null
+  );
 
   useEffect(() => {
+    if (backendApiAvailableRef.current === false) return;
     let active = true;
     fetch('/api/maps-config')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { apiKey?: string } | null) => {
+      .then(async (res) => {
+        const contentType = res.headers.get('content-type') || '';
+        if (!res.ok || !contentType.includes('application/json')) {
+          backendApiAvailableRef.current = false;
+          return null;
+        }
+        backendApiAvailableRef.current = true;
+        return (await res.json()) as { apiKey?: string };
+      })
+      .then((data) => {
         if (active && data?.apiKey) {
           setMapsApiKey(data.apiKey);
         }
       })
       .catch(() => {
-        // Keep Vite env fallback if present
+        backendApiAvailableRef.current = false;
       });
     return () => {
       active = false;
@@ -485,7 +415,8 @@ export function OffersFinder({
       trimmedCity,
       searchMode,
       storeType,
-      customQuery
+      customQuery,
+      language
     );
     const clientOsmFallback = buildClientOsmSearchUrl(trimmedCity);
 
@@ -493,152 +424,188 @@ export function OffersFinder({
     setIsSearching(true);
     setSearchError(null);
     setOffersUnavailable(false);
+    setPlaces([]);
+    setResolvedCity('');
+    setMapCenter(null);
+    setSelectedPlaceId(null);
+    setOffersMarkdown('');
+    setVenueEnrichments([]);
+    setOfferSources([]);
     setFallbackMapsUrl(clientMapsFallback);
     setFallbackOsmUrl(clientOsmFallback);
 
     let detectedCity = trimmedCity;
     let fetchedPlaces: NearbyPlace[] = [];
+    let resolvedFallbackMapsUrl = clientMapsFallback;
+    let resolvedFallbackOsmUrl = clientOsmFallback;
+    let resolvedProvider: 'google' | 'osm' | 'fallback_links' = 'osm';
 
-    try {
-      const storesRes = await fetch('/api/nearby-stores', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    let loadedFromBackend = false;
+
+    if (backendApiAvailableRef.current !== false) {
+      try {
+        const storesRes = await fetch('/api/nearby-stores', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cityQuery: trimmedCity,
+            mode: searchMode,
+            storeType,
+            productCategory: searchMode === 'compras' ? productCategory : 'all',
+            openNowOnly,
+            customQuery,
+            language,
+          }),
+        });
+
+        const contentType = storesRes.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          backendApiAvailableRef.current = false;
+        } else {
+          const storesData = (await storesRes.json()) as {
+            city?: string;
+            center?: { lat: number; lng: number } | null;
+            places?: NearbyPlace[];
+            provider?: 'google' | 'osm' | 'fallback_links';
+            fallbackMapsSearchUrl?: string;
+            fallbackOsmSearchUrl?: string;
+            quotaExceeded?: boolean;
+          };
+
+          if (storesRes.status === 429 || storesData?.quotaExceeded) {
+            window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+          }
+
+          if (storesRes.ok && storesData && (storesData.places?.length || storesData.center)) {
+            loadedFromBackend = true;
+            backendApiAvailableRef.current = true;
+            fetchedPlaces = storesData.places || [];
+            resolvedProvider =
+              storesData.provider || (fetchedPlaces.length > 0 ? 'google' : 'fallback_links');
+            if (storesData.fallbackMapsSearchUrl) {
+              resolvedFallbackMapsUrl = storesData.fallbackMapsSearchUrl;
+            }
+            if (storesData.fallbackOsmSearchUrl) {
+              resolvedFallbackOsmUrl = storesData.fallbackOsmSearchUrl;
+            }
+            if (storesData.center) {
+              setMapCenter(storesData.center);
+            }
+            if (storesData.city) {
+              detectedCity = storesData.city;
+            }
+          } else if (storesRes.status === 404 || storesRes.status === 405) {
+            backendApiAvailableRef.current = false;
+          }
+        }
+      } catch {
+        // Fall back directly to client-side OpenStreetMap/Nominatim/Photon search
+      }
+    }
+
+    if (!loadedFromBackend) {
+      try {
+        const clientResult = await searchNearbyPlacesClient({
           cityQuery: trimmedCity,
           mode: searchMode,
           storeType,
           productCategory: searchMode === 'compras' ? productCategory : 'all',
-          openNowOnly,
           customQuery,
           language,
-        }),
-      });
-
-      const rawStoresText = await storesRes.text();
-      let storesData: {
-        city?: string;
-        center?: { lat: number; lng: number } | null;
-        places?: NearbyPlace[];
-        provider?: 'google' | 'osm' | 'fallback_links';
-        fallbackMapsSearchUrl?: string;
-        fallbackOsmSearchUrl?: string;
-        error?: string;
-        quotaExceeded?: boolean;
-      } | null = null;
-
-      if (rawStoresText) {
-        try {
-          storesData = JSON.parse(rawStoresText);
-        } catch {
-          storesData = null;
+          mapsLanguage,
+        });
+        fetchedPlaces = clientResult.places;
+        resolvedProvider = clientResult.provider;
+        detectedCity = clientResult.city || trimmedCity;
+        resolvedFallbackMapsUrl = clientResult.fallbackMapsSearchUrl;
+        resolvedFallbackOsmUrl = clientResult.fallbackOsmSearchUrl;
+        if (clientResult.center) {
+          setMapCenter(clientResult.center);
         }
+      } catch {
+        fetchedPlaces = [];
+        resolvedProvider = 'fallback_links';
       }
-
-      if (storesRes.status === 429 || storesData?.quotaExceeded) {
-        window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-      }
-
-      if (!storesRes.ok || !storesData) {
-        setPlaces([]);
-        setPlacesProvider('fallback_links');
-        setResolvedCity(trimmedCity);
-      } else {
-        fetchedPlaces = storesData.places || [];
-        setPlaces(fetchedPlaces);
-        setPlacesProvider(
-          storesData.provider || (fetchedPlaces.length > 0 ? 'google' : 'fallback_links')
-        );
-        if (storesData.fallbackMapsSearchUrl) {
-          setFallbackMapsUrl(storesData.fallbackMapsSearchUrl);
-        }
-        if (storesData.fallbackOsmSearchUrl) {
-          setFallbackOsmUrl(storesData.fallbackOsmSearchUrl);
-        }
-        const firstId = fetchedPlaces[0]?.id || null;
-        setSelectedPlaceId(firstId);
-        if (firstId) {
-          setExpandedCalcIds({ [firstId]: true });
-        }
-        if (storesData.center) {
-          setMapCenter(storesData.center);
-        }
-        if (storesData.city) {
-          detectedCity = storesData.city;
-          setResolvedCity(storesData.city);
-        }
-      }
-    } catch {
-      // Never show a bare connection error without an actionable alternative
-      setPlaces([]);
-      setPlacesProvider('fallback_links');
-      setResolvedCity((prev) => prev || trimmedCity);
     }
 
-    // Grounded web search for food offers + game prices (pool, bowling, arcade)
-    try {
-      const offersRes = await fetch('/api/search-offers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          city: detectedCity || trimmedCity,
-          mode: searchMode,
-          productCategory: searchMode === 'compras' ? productCategory : 'all',
-          storeType,
-          customQuery,
-          language,
-          venues: fetchedPlaces.slice(0, 10).map((p) => ({
-            id: p.id,
-            name: p.name,
-            storeType: p.storeTypeLabel,
-            address: p.address,
-          })),
-        }),
-      });
+    setPlaces(fetchedPlaces);
+    setPlacesProvider(resolvedProvider);
+    setResolvedCity(detectedCity);
+    setFallbackMapsUrl(resolvedFallbackMapsUrl);
+    setFallbackOsmUrl(resolvedFallbackOsmUrl);
+    const firstId = fetchedPlaces[0]?.id || null;
+    setSelectedPlaceId(firstId);
+    if (firstId) {
+      setExpandedCalcIds({ [firstId]: true });
+    }
 
-      const rawOffersText = await offersRes.text();
-      let offersData: {
-        city?: string;
-        markdown?: string;
-        venueEnrichments?: VenueEnrichment[];
-        sources?: GroundingSource[];
-        error?: string;
-      } | null = null;
-      if (rawOffersText) {
-        try {
-          offersData = JSON.parse(rawOffersText) as {
+    // Grounded AI offers when backend is available; otherwise client-assembled city & venue summary
+    let loadedAiOffers = false;
+
+    if (backendApiAvailableRef.current !== false) {
+      try {
+        const offersRes = await fetch('/api/search-offers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            city: detectedCity || trimmedCity,
+            mode: searchMode,
+            productCategory: searchMode === 'compras' ? productCategory : 'all',
+            storeType,
+            customQuery,
+            language,
+            venues: fetchedPlaces.slice(0, 10).map((p) => ({
+              id: p.id,
+              name: p.name,
+              storeType: p.storeTypeLabel,
+              address: p.address,
+            })),
+          }),
+        });
+
+        const contentType = offersRes.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          backendApiAvailableRef.current = false;
+        } else if (offersRes.ok) {
+          const offersData = (await offersRes.json()) as {
             city?: string;
             markdown?: string;
             venueEnrichments?: VenueEnrichment[];
             sources?: GroundingSource[];
-            error?: string;
           };
-        } catch {
-          offersData = null;
+          if (offersData?.markdown) {
+            loadedAiOffers = true;
+            setOffersUnavailable(false);
+            setOffersMarkdown(offersData.markdown);
+            setVenueEnrichments(offersData.venueEnrichments || []);
+            setOfferSources(offersData.sources || []);
+          }
+        } else if (offersRes.status === 404 || offersRes.status === 405) {
+          backendApiAvailableRef.current = false;
         }
+      } catch {
+        // Seamless static/offline fallback below
       }
-
-      if (!offersRes.ok || !offersData || !offersData.markdown) {
-        setOffersUnavailable(true);
-        setOffersMarkdown('');
-        setVenueEnrichments([]);
-        setOfferSources([]);
-      } else {
-        if (offersData.city && !resolvedCity) {
-          setResolvedCity(offersData.city);
-        }
-        setOffersUnavailable(false);
-        setOffersMarkdown(offersData.markdown || '');
-        setVenueEnrichments(offersData.venueEnrichments || []);
-        setOfferSources(offersData.sources || []);
-      }
-    } catch {
-      setOffersUnavailable(true);
-      setOffersMarkdown('');
-      setVenueEnrichments([]);
-      setOfferSources([]);
-    } finally {
-      setIsSearching(false);
     }
+
+    if (!loadedAiOffers) {
+      const fallbackSummary = buildClientOffersFallback({
+        city: detectedCity || trimmedCity,
+        mode: searchMode,
+        storeType,
+        customQuery,
+        places: fetchedPlaces,
+        language,
+        fallbackMapsSearchUrl: resolvedFallbackMapsUrl,
+        fallbackOsmSearchUrl: resolvedFallbackOsmUrl,
+      });
+      setOffersUnavailable(true);
+      setOffersMarkdown(fallbackSummary.markdown);
+      setVenueEnrichments(fallbackSummary.venueEnrichments);
+      setOfferSources(fallbackSummary.sources);
+    }
+
+    setIsSearching(false);
   }, [
     manualCity,
     searchMode,
@@ -646,8 +613,8 @@ export function OffersFinder({
     productCategory,
     openNowOnly,
     customQuery,
-    resolvedCity,
     language,
+    mapsLanguage,
     t.offers,
   ]);
 
@@ -1035,7 +1002,8 @@ export function OffersFinder({
                             resolvedCity || manualCity,
                             searchMode,
                             storeType,
-                            customQuery
+                            customQuery,
+                            language
                           )
                         }
                         target="_blank"
@@ -1143,7 +1111,8 @@ export function OffersFinder({
                             resolvedCity || manualCity,
                             searchMode,
                             storeType,
-                            customQuery
+                            customQuery,
+                            language
                           )
                         }
                         target="_blank"
@@ -1700,45 +1669,60 @@ export function OffersFinder({
                 </h3>
               </div>
 
-              {offersUnavailable ? (
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-2.5">
-                  <div className="flex items-start gap-2.5">
-                    <MapPin
-                      className="w-4 h-4 text-emerald-600 dark:text-violet-400 shrink-0 mt-0.5"
-                      aria-hidden="true"
-                    />
-                    <div className="space-y-1 min-w-0">
-                      <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                        {t.offers.mapsPromoTipTitle}
-                      </p>
-                      <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                        {t.offers.mapsPromoTipBody}
-                      </p>
-                    </div>
-                  </div>
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                      `${customQuery.trim() || (searchMode === 'salidas' ? 'promociones restaurantes restobares pool' : 'ofertas carnicerias supermercados')} ${resolvedCity || manualCity.trim() || 'Argentina'}`
-                    )}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-violet-500/35 bg-white dark:bg-slate-900 text-xs font-semibold text-emerald-700 dark:text-violet-300 hover:border-emerald-400 dark:hover:border-violet-400 transition-colors"
-                  >
-                    <span>{t.offers.searchPromosInMapsBtn}</span>
-                    <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                  </a>
-                </div>
-              ) : isSearching && !offersMarkdown ? (
+              {isSearching && !offersMarkdown ? (
                 <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <Loader2 className="w-5 h-5 animate-spin text-emerald-600 dark:text-violet-400" />
                   <span>{t.offers.searchingWebOffers}</span>
                 </div>
-              ) : offersMarkdown ? (
-                <FormattedOffersMarkdown markdown={offersMarkdown} />
               ) : (
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {t.offers.clickToSearchOffers}
-                </p>
+                <div className="space-y-4">
+                  {offersMarkdown ? (
+                    <FormattedOffersMarkdown markdown={offersMarkdown} />
+                  ) : (
+                    !offersUnavailable && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {t.offers.clickToSearchOffers}
+                      </p>
+                    )
+                  )}
+
+                  {offersUnavailable && (
+                    <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+                      <div className="flex items-start gap-2.5">
+                        <MapPin
+                          className="w-4 h-4 text-emerald-600 dark:text-violet-400 shrink-0 mt-0.5"
+                          aria-hidden="true"
+                        />
+                        <div className="space-y-1 min-w-0">
+                          <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                            {t.offers.mapsPromoTipTitle}
+                          </p>
+                          <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                            {t.offers.mapsPromoTipBody}
+                          </p>
+                        </div>
+                      </div>
+                      <a
+                        href={
+                          fallbackMapsUrl ||
+                          buildClientMapsSearchUrl(
+                            resolvedCity || manualCity,
+                            searchMode,
+                            storeType,
+                            customQuery,
+                            language
+                          )
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-violet-500/35 bg-white dark:bg-slate-900 text-xs font-semibold text-emerald-700 dark:text-violet-300 hover:border-emerald-400 dark:hover:border-violet-400 transition-colors"
+                      >
+                        <span>{t.offers.searchPromosInMapsBtn}</span>
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      </a>
+                    </div>
+                  )}
+                </div>
               )}
 
               {offerSources.length > 0 && (
@@ -1785,7 +1769,7 @@ export function OffersFinder({
                   </a>
                   .
                 </p>
-                {placesProvider === 'osm' && (
+                {(placesProvider === 'osm' || Boolean(effectiveMapCenter && !mapsApiKey)) && (
                   <p>{t.offers.osmAttribution}</p>
                 )}
               </div>

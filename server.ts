@@ -228,37 +228,237 @@ function extractCityFromComponents(components?: AddressComponentLike[]): string 
   return locality || province || '';
 }
 
-function resolveCitySearchBias(rawCity: string): {
+interface GlobalCityResolution {
   raw: string;
   cityForGeocode: string;
   cityForSearch: string;
+  countryCode: string; // uppercase ISO-3166-1 alpha-2 if known (e.g. 'AR', 'ES', 'JP')
   prioritizeArgentina: boolean;
-} {
+  center: { lat: number; lng: number } | null;
+  viewboxParam: string;
+}
+
+async function resolveCitySearchGlobal(
+  rawCity: string,
+  mapsLang = 'es'
+): Promise<GlobalCityResolution> {
   const clean = rawCity.trim();
   if (!clean) {
     return {
       raw: '',
       cityForGeocode: 'Argentina',
       cityForSearch: 'Argentina',
+      countryCode: 'AR',
       prioritizeArgentina: true,
+      center: null,
+      viewboxParam: '',
     };
   }
 
-  const hasExplicitForeignCountryOrUsState =
-    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|u\.s\.a\.?|united states|ee\.?\s*uu\.?|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
+  const hasExplicitCountry =
+    /\b(argentina|españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|u\.s\.a\.?|united states|ee\.?\s*uu\.?|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia|korea|corea|india|turquia|turkey|grecia|greece|suiza|switzerland|holanda|netherlands|belgica|belgium)\b/i.test(
       clean
-    ) || /,\s*(tx|ca|ny|fl|il|az|wa|nv|co|ma|ga|nc|oh|pa|mi)\b/i.test(clean);
+    ) || /,\s*[a-z]{2,}$/i.test(clean);
 
   const hasArgentina = /\bargentina\b/i.test(clean);
-  const prioritizeArgentina = !hasExplicitForeignCountryOrUsState;
-  const cityWithCountry =
-    prioritizeArgentina && !hasArgentina ? `${clean}, Argentina` : clean;
+  if (hasArgentina) {
+    return {
+      raw: clean,
+      cityForGeocode: clean,
+      cityForSearch: clean,
+      countryCode: 'AR',
+      prioritizeArgentina: true,
+      center: null,
+      viewboxParam: '',
+    };
+  }
+
+  // Query Open-Meteo Geocoding + Nominatim + Photon globally so any city resolves cleanly
+  try {
+    const osmHeaders = {
+      'User-Agent': 'CuentasClarasApp/1.0 (+https://cuentasclaras.app)',
+      'Accept-Language': mapsLang,
+    };
+    const cityHead = clean.split(',')[0].trim();
+
+    const [meteoRes, nomRes, photonRes] = await Promise.all([
+      fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+          cityHead
+        )}&count=5&language=${encodeURIComponent(mapsLang)}`,
+        { signal: AbortSignal.timeout(3500) }
+      )
+        .then((r) => (r.ok ? r.json() : { results: [] }))
+        .catch(() => ({ results: [] })),
+      fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+          clean
+        )}&format=jsonv2&addressdetails=1&limit=5&accept-language=${encodeURIComponent(mapsLang)}`,
+        { headers: osmHeaders, signal: AbortSignal.timeout(4000) }
+      )
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []),
+      fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(clean)}&limit=4`, {
+        signal: AbortSignal.timeout(3500),
+      })
+        .then((r) => (r.ok ? r.json() : { features: [] }))
+        .catch(() => ({ features: [] })),
+    ]);
+
+    const meteoResults = Array.isArray((meteoRes as { results?: unknown[] }).results)
+      ? ((meteoRes as {
+          results: Array<{
+            name?: string;
+            latitude?: number;
+            longitude?: number;
+            country_code?: string;
+            country?: string;
+            admin1?: string;
+          }>;
+        }).results)
+      : [];
+
+    const nomRows = Array.isArray(nomRes)
+      ? (nomRes as Array<{
+          lat: string;
+          lon: string;
+          type?: string;
+          addresstype?: string;
+          importance?: number;
+          name?: string;
+          display_name?: string;
+          boundingbox?: [string, string, string, string];
+          address?: Record<string, string>;
+        }>)
+      : [];
+
+    const photonFeatures = Array.isArray(
+      (photonRes as { features?: unknown[] }).features
+    )
+      ? ((photonRes as {
+          features: Array<{
+            properties?: {
+              osm_value?: string;
+              type?: string;
+              name?: string;
+              city?: string;
+              state?: string;
+              country?: string;
+              countrycode?: string;
+            };
+            geometry?: { coordinates?: [number, number] };
+          }>;
+        }).features)
+      : [];
+
+    const settlementTypes = new Set([
+      'city',
+      'town',
+      'village',
+      'municipality',
+      'administrative',
+      'borough',
+      'suburb',
+      'state_district',
+      'province',
+    ]);
+
+    const nomSettlements = nomRows.filter(
+      (r) => settlementTypes.has(r.addresstype || '') || settlementTypes.has(r.type || '')
+    );
+    const bestNom = nomSettlements[0] || nomRows[0];
+
+    const bestPhotonCity = photonFeatures.find((f) => {
+      const val = f.properties?.osm_value || f.properties?.type || '';
+      return ['city', 'town', 'village', 'borough', 'suburb', 'province', 'state'].includes(val);
+    });
+    const bestMeteo = meteoResults[0];
+
+    if (bestMeteo || bestNom || bestPhotonCity) {
+      let cc = (
+        bestNom?.address?.country_code ||
+        bestPhotonCity?.properties?.countrycode ||
+        bestMeteo?.country_code ||
+        ''
+      ).toUpperCase();
+      let display = clean;
+      let center: { lat: number; lng: number } | null = null;
+      let viewboxParam = '';
+
+      if (
+        bestMeteo &&
+        typeof bestMeteo.latitude === 'number' &&
+        typeof bestMeteo.longitude === 'number'
+      ) {
+        center = { lat: bestMeteo.latitude, lng: bestMeteo.longitude };
+        const cleanName = (bestMeteo.name || '').replace(/^Ciudad de\s+/i, '').trim();
+        const mParts = [cleanName, bestMeteo.admin1, bestMeteo.country].filter(
+          (v, idx, arr) => Boolean(v) && arr.indexOf(v) === idx
+        );
+        if (mParts.length > 0) display = mParts.join(', ');
+      }
+
+      if (bestNom) {
+        const addr = bestNom.address || {};
+        const locality =
+          addr.city || addr.town || addr.village || addr.municipality || bestNom.name || '';
+        const state = addr.state || '';
+        const country = addr.country || '';
+        const parts = [locality, state, country].filter(
+          (v, idx, arr) => Boolean(v) && arr.indexOf(v) === idx
+        );
+        if (parts.length > 0) {
+          display = parts.join(', ');
+        }
+        const nLat = Number(bestNom.lat);
+        const nLng = Number(bestNom.lon);
+        if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+          center = { lat: nLat, lng: nLng };
+        }
+        if (Array.isArray(bestNom.boundingbox) && bestNom.boundingbox.length === 4) {
+          const [south, north, west, east] = bestNom.boundingbox;
+          viewboxParam = `&viewbox=${west},${north},${east},${south}`;
+        }
+      }
+
+      if (bestPhotonCity?.geometry?.coordinates?.length === 2) {
+        const [pLng, pLat] = bestPhotonCity.geometry.coordinates;
+        const pCc = (bestPhotonCity.properties?.countrycode || '').toUpperCase();
+        if (Number.isFinite(pLat) && Number.isFinite(pLng) && (!cc || !pCc || cc === pCc)) {
+          center = { lat: pLat, lng: pLng };
+          if (!cc && pCc) cc = pCc;
+          if (display === clean) {
+            const p = bestPhotonCity.properties || {};
+            const pParts = [p.name || p.city, p.state, p.country].filter(
+              (v, idx, arr) => Boolean(v) && arr.indexOf(v) === idx
+            );
+            if (pParts.length > 0) display = pParts.join(', ');
+          }
+        }
+      }
+
+      return {
+        raw: clean,
+        cityForGeocode: hasExplicitCountry ? clean : display,
+        cityForSearch: hasExplicitCountry ? clean : display,
+        countryCode: cc,
+        prioritizeArgentina: cc === 'AR',
+        center,
+        viewboxParam,
+      };
+    }
+  } catch {
+    // Fall through cleanly
+  }
 
   return {
     raw: clean,
-    cityForGeocode: cityWithCountry,
-    cityForSearch: cityWithCountry,
-    prioritizeArgentina,
+    cityForGeocode: clean,
+    cityForSearch: clean,
+    countryCode: '',
+    prioritizeArgentina: false,
+    center: null,
+    viewboxParam: '',
   };
 }
 
@@ -567,11 +767,11 @@ Reglas estrictas:
       return;
     }
 
-    const cityBias = resolveCitySearchBias(trimmedCity);
+    const cityBias = await resolveCitySearchGlobal(trimmedCity, mapsLang);
     let centerCoords: { lat: number; lng: number } | null = hasCoords
       ? { lat: lat!, lng: lng! }
-      : null;
-    let resolvedCity = trimmedCity;
+      : cityBias.center;
+    let resolvedCity = hasCoords ? trimmedCity : cityBias.cityForSearch || trimmedCity;
 
     type StoreBucketKey =
       | 'carniceria'
@@ -771,18 +971,12 @@ Reglas estrictas:
             : 'carnicerias panaderias supermercados heladerias'
         );
       }
-      const loc =
-        cityBias.prioritizeArgentina && !/\bargentina\b/i.test(cityLabel)
-          ? `${cityLabel}, Argentina`
-          : cityLabel;
+      const loc = cityLabel || cityBias.cityForSearch || trimmedCity;
       return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${topicParts.join(' ')} ${loc}`.trim())}`;
     };
 
     const buildOsmSearchUrl = (cityLabel: string): string => {
-      const loc =
-        cityBias.prioritizeArgentina && !/\bargentina\b/i.test(cityLabel)
-          ? `${cityLabel}, Argentina`
-          : cityLabel;
+      const loc = cityLabel || cityBias.cityForSearch || trimmedCity;
       return `https://www.openstreetmap.org/search?query=${encodeURIComponent(loc)}`;
     };
 
@@ -870,30 +1064,40 @@ Reglas estrictas:
             }>;
           };
 
-          let nomResults = await fetchNomCity(cityBias.prioritizeArgentina ? 'ar' : undefined);
-          if (nomResults.length === 0 && cityBias.prioritizeArgentina) {
-            nomResults = await fetchNomCity(undefined);
+          if (cityBias.viewboxParam) {
+            viewboxParam = cityBias.viewboxParam;
           }
 
-          const first = nomResults[0];
-          if (first) {
-            const parsedLat = Number(first.lat);
-            const parsedLng = Number(first.lon);
-            if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
-              osmCenter = { lat: parsedLat, lng: parsedLng };
+          if (!osmCenter || !viewboxParam) {
+            let nomResults = await fetchNomCity(
+              cityBias.countryCode ? cityBias.countryCode.toLowerCase() : undefined
+            );
+            if (nomResults.length === 0 && cityBias.countryCode) {
+              nomResults = await fetchNomCity(undefined);
             }
-            if (Array.isArray(first.boundingbox) && first.boundingbox.length === 4) {
-              const [south, north, west, east] = first.boundingbox;
-              viewboxParam = `&viewbox=${west},${north},${east},${south}`;
-            }
-            const addr = first.address || {};
-            const locality =
-              addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
-            const state = addr.state || '';
-            if (locality && state && locality.toLowerCase() !== state.toLowerCase()) {
-              osmCity = `${locality}, ${state}`;
-            } else if (locality || state) {
-              osmCity = locality || state;
+
+            const first = nomResults[0];
+            if (first) {
+              const parsedLat = Number(first.lat);
+              const parsedLng = Number(first.lon);
+              if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
+                osmCenter = { lat: parsedLat, lng: parsedLng };
+              }
+              if (Array.isArray(first.boundingbox) && first.boundingbox.length === 4) {
+                const [south, north, west, east] = first.boundingbox;
+                viewboxParam = `&viewbox=${west},${north},${east},${south}`;
+              }
+              const addr = first.address || {};
+              const locality =
+                addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+              const state = addr.state || '';
+              const country = addr.country || '';
+              const parts = [locality, state, country].filter(
+                (v, idx, arr) => Boolean(v) && arr.indexOf(v) === idx
+              );
+              if (parts.length > 0) {
+                osmCity = parts.join(', ');
+              }
             }
           }
         }
@@ -901,7 +1105,7 @@ Reglas estrictas:
         // Proceed even if Nominatim geocode fails
       }
 
-      const cityForMapsLink = osmCity || cityBias.cityForSearch || trimmedCity || 'Argentina';
+      const cityForMapsLink = osmCity || cityBias.cityForSearch || trimmedCity || 'Buenos Aires';
       const osmPlaces: NormalizedPlace[] = [];
       const seenOsmIds = new Set<string>();
 
@@ -1143,10 +1347,13 @@ Reglas estrictas:
 
     if (mapsKey) {
       try {
-        // Reverse or forward geocode to identify city & center coordinates (prioritizing Argentina unless another country is specified)
+        const regionParam =
+          cityBias.countryCode && /^[A-Z]{2}$/.test(cityBias.countryCode)
+            ? `&region=${cityBias.countryCode.toLowerCase()}`
+            : '';
         const geocodeUrl = hasCoords
           ? `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`
-          : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityBias.cityForGeocode)}${cityBias.prioritizeArgentina ? '&region=ar' : ''}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
+          : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityBias.cityForGeocode)}${regionParam}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
 
         const geoRes = await fetch(geocodeUrl, { signal: AbortSignal.timeout(7000) });
         if (geoRes.status === 429) {
@@ -1268,11 +1475,7 @@ Reglas estrictas:
                 bucket === 'juegos_comida' ||
                 (!isGamesQuery && mode === 'salidas'));
             const baseTopic = useUserQueryInPlaces ? `${trimmedQuery} ${meta.query}` : meta.query;
-            const locationTextForPlaces = cityBias.prioritizeArgentina
-              ? /\bargentina\b/i.test(resolvedCity)
-                ? resolvedCity
-                : `${resolvedCity || trimmedCity}, Argentina`
-              : resolvedCity || cityBias.cityForSearch;
+            const locationTextForPlaces = resolvedCity || cityBias.cityForSearch;
             const queryText =
               !hasCoords && locationTextForPlaces
                 ? `${baseTopic} ${locationTextForPlaces}`
@@ -1291,8 +1494,8 @@ Reglas estrictas:
               pageSize,
             };
 
-            if (cityBias.prioritizeArgentina) {
-              body.regionCode = 'AR';
+            if (cityBias.countryCode && /^[A-Z]{2}$/.test(cityBias.countryCode)) {
+              body.regionCode = cityBias.countryCode;
             }
 
             if (openNowOnly) {
@@ -1516,8 +1719,8 @@ Reglas estrictas:
       return;
     }
 
-    const cityBias = resolveCitySearchBias(city || '');
-    const targetCity = cityBias.cityForSearch || 'Argentina';
+    const cityBias = await resolveCitySearchGlobal(city || '', MAPS_LANG_BY_CODE[lang]);
+    const targetCity = cityBias.cityForSearch || (city || '').trim() || 'Buenos Aires';
 
     const PRODUCT_LABELS: Record<string, string> = {
       all: 'meat cuts for barbecue/grill, soft drinks/sodas, ice cream, and bread/pastries',
