@@ -553,15 +553,11 @@ Reglas estrictas:
     const errMsgs = SERVER_ERRORS[lang];
     const mapsLang = MAPS_LANG_BY_CODE[lang];
 
-    const mapsKey = getMapsApiKey();
-    if (!mapsKey) {
-      res.status(503).json({
-        error: errMsgs.mapsKeyMissing,
-      });
-      return;
-    }
-
-    const hasCoords = typeof lat === 'number' && Number.isFinite(lat) && typeof lng === 'number' && Number.isFinite(lng);
+    const hasCoords =
+      typeof lat === 'number' &&
+      Number.isFinite(lat) &&
+      typeof lng === 'number' &&
+      Number.isFinite(lng);
     const trimmedCity = (cityQuery || '').trim();
 
     if (!hasCoords && !trimmedCity) {
@@ -572,54 +568,10 @@ Reglas estrictas:
     }
 
     const cityBias = resolveCitySearchBias(trimmedCity);
-    let centerCoords: { lat: number; lng: number } | null = hasCoords ? { lat: lat!, lng: lng! } : null;
+    let centerCoords: { lat: number; lng: number } | null = hasCoords
+      ? { lat: lat!, lng: lng! }
+      : null;
     let resolvedCity = trimmedCity;
-
-    try {
-      // Reverse or forward geocode to identify city & center coordinates (prioritizing Argentina unless another country is specified)
-      const geocodeUrl = hasCoords
-        ? `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`
-        : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityBias.cityForGeocode)}${cityBias.prioritizeArgentina ? '&region=ar' : ''}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
-
-      const geoRes = await fetch(geocodeUrl);
-      if (geoRes.status === 429) {
-        res.status(429).json({
-          error: errMsgs.mapsQuotaExceeded,
-          quotaExceeded: true,
-        });
-        return;
-      }
-      if (geoRes.ok) {
-        const geoData = (await geoRes.json()) as {
-          status?: string;
-          results?: Array<{
-            geometry?: { location?: { lat: number; lng: number } };
-            address_components?: AddressComponentLike[];
-            formatted_address?: string;
-          }>;
-        };
-        if (geoData.status === 'OVER_QUERY_LIMIT') {
-          res.status(429).json({
-            error: errMsgs.mapsQuotaExceeded,
-            quotaExceeded: true,
-          });
-          return;
-        }
-        const first = geoData.results?.[0];
-        if (first) {
-          const detected = extractCityFromComponents(first.address_components);
-          if (detected) resolvedCity = detected;
-          if (!centerCoords && first.geometry?.location) {
-            centerCoords = {
-              lat: first.geometry.location.lat,
-              lng: first.geometry.location.lng,
-            };
-          }
-        }
-      }
-    } catch {
-      // Continue cleanly to Places Text Search even if Geocoding is unavailable
-    }
 
     type StoreBucketKey =
       | 'carniceria'
@@ -629,6 +581,29 @@ Reglas estrictas:
       | 'restaurante'
       | 'restobar'
       | 'juegos_comida';
+
+    interface NormalizedPlace {
+      id: string;
+      name: string;
+      storeType: StoreBucketKey;
+      storeTypeLabel: string;
+      address: string;
+      lat: number | null;
+      lng: number | null;
+      distanceMeters: number | null;
+      rating: number | null;
+      userRatingCount: number | null;
+      openNow: boolean | null;
+      priceLevelLabel: string | null;
+      priceRange: {
+        currencyCode: string;
+        startUnits: number | null;
+        endUnits: number | null;
+      } | null;
+      googleMapsUri: string;
+      osmUri?: string | null;
+      websiteUri: string | null;
+    }
 
     const STORE_LABELS_BY_LANG: Record<LangCode, Record<StoreBucketKey, string>> = {
       es: {
@@ -727,13 +702,34 @@ Reglas estrictas:
     };
 
     const STORE_QUERIES: Record<StoreBucketKey, { label: string; query: string }> = {
-      restaurante: { label: STORE_LABELS_BY_LANG[lang].restaurante, query: STORE_QUERIES_BY_LANG[lang].restaurante },
-      restobar: { label: STORE_LABELS_BY_LANG[lang].restobar, query: STORE_QUERIES_BY_LANG[lang].restobar },
-      juegos_comida: { label: STORE_LABELS_BY_LANG[lang].juegos_comida, query: STORE_QUERIES_BY_LANG[lang].juegos_comida },
-      carniceria: { label: STORE_LABELS_BY_LANG[lang].carniceria, query: STORE_QUERIES_BY_LANG[lang].carniceria },
-      panaderia: { label: STORE_LABELS_BY_LANG[lang].panaderia, query: STORE_QUERIES_BY_LANG[lang].panaderia },
-      supermercado: { label: STORE_LABELS_BY_LANG[lang].supermercado, query: STORE_QUERIES_BY_LANG[lang].supermercado },
-      heladeria: { label: STORE_LABELS_BY_LANG[lang].heladeria, query: STORE_QUERIES_BY_LANG[lang].heladeria },
+      restaurante: {
+        label: STORE_LABELS_BY_LANG[lang].restaurante,
+        query: STORE_QUERIES_BY_LANG[lang].restaurante,
+      },
+      restobar: {
+        label: STORE_LABELS_BY_LANG[lang].restobar,
+        query: STORE_QUERIES_BY_LANG[lang].restobar,
+      },
+      juegos_comida: {
+        label: STORE_LABELS_BY_LANG[lang].juegos_comida,
+        query: STORE_QUERIES_BY_LANG[lang].juegos_comida,
+      },
+      carniceria: {
+        label: STORE_LABELS_BY_LANG[lang].carniceria,
+        query: STORE_QUERIES_BY_LANG[lang].carniceria,
+      },
+      panaderia: {
+        label: STORE_LABELS_BY_LANG[lang].panaderia,
+        query: STORE_QUERIES_BY_LANG[lang].panaderia,
+      },
+      supermercado: {
+        label: STORE_LABELS_BY_LANG[lang].supermercado,
+        query: STORE_QUERIES_BY_LANG[lang].supermercado,
+      },
+      heladeria: {
+        label: STORE_LABELS_BY_LANG[lang].heladeria,
+        query: STORE_QUERIES_BY_LANG[lang].heladeria,
+      },
     };
 
     const trimmedQuery = (customQuery || '').trim();
@@ -763,286 +759,718 @@ Reglas estrictas:
       bucketsToSearch = ['restaurante', 'restobar', 'juegos_comida', 'carniceria', 'supermercado'];
     }
 
-    const fieldMask = [
-      'places.id',
-      'places.displayName',
-      'places.formattedAddress',
-      'places.shortFormattedAddress',
-      'places.location',
-      'places.googleMapsUri',
-      'places.primaryType',
-      'places.primaryTypeDisplayName',
-      'places.rating',
-      'places.userRatingCount',
-      'places.currentOpeningHours.openNow',
-      'places.priceLevel',
-      'places.priceRange',
-      'places.websiteUri',
-      'places.addressComponents',
-    ].join(',');
+    const buildGoogleMapsSearchUrl = (cityLabel: string): string => {
+      const topicParts: string[] = [];
+      if (trimmedQuery) topicParts.push(trimmedQuery);
+      if (storeType !== 'all' && storeType in STORE_QUERIES) {
+        topicParts.push(STORE_QUERIES[storeType].label);
+      } else if (!trimmedQuery) {
+        topicParts.push(
+          mode === 'salidas'
+            ? 'restaurantes restobares pool juegos'
+            : 'carnicerias panaderias supermercados heladerias'
+        );
+      }
+      const loc =
+        cityBias.prioritizeArgentina && !/\bargentina\b/i.test(cityLabel)
+          ? `${cityLabel}, Argentina`
+          : cityLabel;
+      return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${topicParts.join(' ')} ${loc}`.trim())}`;
+    };
 
-    interface RawPlace {
-      id: string;
-      displayName?: { text?: string };
-      formattedAddress?: string;
-      shortFormattedAddress?: string;
-      location?: { latitude: number; longitude: number };
-      googleMapsUri?: string;
-      primaryType?: string;
-      primaryTypeDisplayName?: { text?: string };
-      rating?: number;
-      userRatingCount?: number;
-      currentOpeningHours?: { openNow?: boolean };
-      priceLevel?: string;
-      priceRange?: {
-        startPrice?: { currencyCode?: string; units?: string };
-        endPrice?: { currencyCode?: string; units?: string };
+    const buildOsmSearchUrl = (cityLabel: string): string => {
+      const loc =
+        cityBias.prioritizeArgentina && !/\bargentina\b/i.test(cityLabel)
+          ? `${cityLabel}, Argentina`
+          : cityLabel;
+      return `https://www.openstreetmap.org/search?query=${encodeURIComponent(loc)}`;
+    };
+
+    const sortNormalizedPlaces = (items: NormalizedPlace[]): NormalizedPlace[] =>
+      items.sort((a, b) => {
+        if (trimmedQuery) {
+          const tokens = trimmedQuery
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w) => w.length >= 3);
+          const scorePlace = (item: { name: string; storeType: string; storeTypeLabel: string }) => {
+            const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
+            let score = 0;
+            for (const tok of tokens) {
+              if (hay.includes(tok)) score += 3;
+            }
+            if (isGamesQuery && item.storeType === 'juegos_comida') score += 2;
+            return score;
+          };
+          const diff = scorePlace(b) - scorePlace(a);
+          if (diff !== 0) return diff;
+        }
+        if (a.distanceMeters !== null && b.distanceMeters !== null) {
+          return a.distanceMeters - b.distanceMeters;
+        }
+        return (b.rating || 0) - (a.rating || 0);
+      });
+
+    // OpenStreetMap Nominatim + Overpass fallback helper
+    const searchWithOpenStreetMap = async (): Promise<{
+      city: string;
+      center: { lat: number; lng: number } | null;
+      places: NormalizedPlace[];
+    }> => {
+      const osmHeaders = {
+        'User-Agent': 'CuentasClarasApp/1.0 (+https://cuentasclaras.app)',
+        'Accept-Language': mapsLang,
       };
-      websiteUri?: string;
-      addressComponents?: AddressComponentLike[];
+
+      let osmCenter = centerCoords;
+      let osmCity = resolvedCity || trimmedCity;
+      let viewboxParam = '';
+
+      // 1. Geocode with Nominatim if we need coordinates or readable city name
+      try {
+        if (hasCoords && osmCenter) {
+          const revUrl = `https://nominatim.openstreetmap.org/reverse?lat=${osmCenter.lat}&lon=${osmCenter.lng}&format=jsonv2&addressdetails=1`;
+          const revRes = await fetch(revUrl, {
+            headers: osmHeaders,
+            signal: AbortSignal.timeout(7000),
+          });
+          if (revRes.ok) {
+            const revData = (await revRes.json()) as {
+              address?: Record<string, string>;
+            };
+            const locality =
+              revData.address?.city ||
+              revData.address?.town ||
+              revData.address?.village ||
+              revData.address?.municipality ||
+              '';
+            const state = revData.address?.state || '';
+            if (locality && state && locality.toLowerCase() !== state.toLowerCase()) {
+              osmCity = `${locality}, ${state}`;
+            } else if (locality || state) {
+              osmCity = locality || state;
+            }
+          }
+        } else if (trimmedCity) {
+          const fetchNomCity = async (countryCodes?: string) => {
+            const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+              cityBias.cityForGeocode
+            )}&format=jsonv2&addressdetails=1&limit=1${countryCodes ? `&countrycodes=${countryCodes}` : ''}`;
+            const r = await fetch(url, {
+              headers: osmHeaders,
+              signal: AbortSignal.timeout(7000),
+            });
+            if (!r.ok) return [];
+            return (await r.json()) as Array<{
+              lat: string;
+              lon: string;
+              boundingbox?: [string, string, string, string];
+              display_name?: string;
+              address?: Record<string, string>;
+            }>;
+          };
+
+          let nomResults = await fetchNomCity(cityBias.prioritizeArgentina ? 'ar' : undefined);
+          if (nomResults.length === 0 && cityBias.prioritizeArgentina) {
+            nomResults = await fetchNomCity(undefined);
+          }
+
+          const first = nomResults[0];
+          if (first) {
+            const parsedLat = Number(first.lat);
+            const parsedLng = Number(first.lon);
+            if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
+              osmCenter = { lat: parsedLat, lng: parsedLng };
+            }
+            if (Array.isArray(first.boundingbox) && first.boundingbox.length === 4) {
+              const [south, north, west, east] = first.boundingbox;
+              viewboxParam = `&viewbox=${west},${north},${east},${south}`;
+            }
+            const addr = first.address || {};
+            const locality =
+              addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+            const state = addr.state || '';
+            if (locality && state && locality.toLowerCase() !== state.toLowerCase()) {
+              osmCity = `${locality}, ${state}`;
+            } else if (locality || state) {
+              osmCity = locality || state;
+            }
+          }
+        }
+      } catch {
+        // Proceed even if Nominatim geocode fails
+      }
+
+      const cityForMapsLink = osmCity || cityBias.cityForSearch || trimmedCity || 'Argentina';
+      const osmPlaces: NormalizedPlace[] = [];
+      const seenOsmIds = new Set<string>();
+
+      const classifyOsmTags = (tags: Record<string, string>): StoreBucketKey => {
+        const amenity = (tags.amenity || '').toLowerCase();
+        const shop = (tags.shop || '').toLowerCase();
+        const leisure = (tags.leisure || '').toLowerCase();
+        const sport = (tags.sport || '').toLowerCase();
+        const nameLower = (tags.name || '').toLowerCase();
+
+        if (
+          leisure === 'bowling_alley' ||
+          leisure === 'amusement_arcade' ||
+          leisure === 'adult_gaming_centre' ||
+          sport === 'billiards' ||
+          sport === 'snooker' ||
+          sport === '10pin' ||
+          /\b(pool|billar|arcade|bowling|fichines|juegos)\b/i.test(nameLower)
+        ) {
+          return 'juegos_comida';
+        }
+        if (amenity === 'bar' || amenity === 'pub' || amenity === 'biergarten') {
+          return bucketsToSearch.includes('restobar') ? 'restobar' : bucketsToSearch[0] || 'restobar';
+        }
+        if (shop === 'butcher') return 'carniceria';
+        if (shop === 'bakery' || shop === 'pastry') return 'panaderia';
+        if (shop === 'supermarket' || shop === 'convenience' || shop === 'grocery') return 'supermercado';
+        if (amenity === 'ice_cream' || shop === 'ice_cream') return 'heladeria';
+        if (amenity === 'restaurant' || amenity === 'fast_food' || amenity === 'cafe') {
+          return bucketsToSearch.includes('restaurante')
+            ? 'restaurante'
+            : bucketsToSearch[0] || 'restaurante';
+        }
+        return bucketsToSearch[0] || 'restaurante';
+      };
+
+      // 2. Query Overpass API around osmCenter
+      if (osmCenter) {
+        const overpassSelectors: string[] = [];
+        const r = 7500;
+        const { lat: cLat, lng: cLng } = osmCenter;
+
+        for (const bucket of bucketsToSearch) {
+          if (bucket === 'restaurante') {
+            overpassSelectors.push(`nwr["amenity"="restaurant"](around:${r},${cLat},${cLng});`);
+          } else if (bucket === 'restobar') {
+            overpassSelectors.push(`nwr["amenity"~"^(bar|pub|biergarten)$"](around:${r},${cLat},${cLng});`);
+          } else if (bucket === 'juegos_comida') {
+            overpassSelectors.push(
+              `nwr["leisure"~"^(bowling_alley|amusement_arcade|adult_gaming_centre)$"](around:${r},${cLat},${cLng});`,
+              `nwr["sport"~"^(billiards|snooker|10pin)$"](around:${r},${cLat},${cLng});`,
+              `nwr["amenity"~"^(bar|pub)$"]["name"~"(pool|billar|arcade|bowling|juego)",i](around:${r},${cLat},${cLng});`
+            );
+          } else if (bucket === 'carniceria') {
+            overpassSelectors.push(`nwr["shop"="butcher"](around:${r},${cLat},${cLng});`);
+          } else if (bucket === 'panaderia') {
+            overpassSelectors.push(`nwr["shop"~"^(bakery|pastry)$"](around:${r},${cLat},${cLng});`);
+          } else if (bucket === 'supermercado') {
+            overpassSelectors.push(`nwr["shop"~"^(supermarket|convenience|grocery)$"](around:${r},${cLat},${cLng});`);
+          } else if (bucket === 'heladeria') {
+            overpassSelectors.push(
+              `nwr["amenity"="ice_cream"](around:${r},${cLat},${cLng});`,
+              `nwr["shop"="ice_cream"](around:${r},${cLat},${cLng});`
+            );
+          }
+        }
+
+        const ql = `[out:json][timeout:8];(\n${overpassSelectors.join('\n')}\n);out center 40;`;
+        const overpassEndpoints = [
+          'https://overpass-api.de/api/interpreter',
+          'https://overpass.kumi.systems/api/interpreter',
+        ];
+
+        for (const endpoint of overpassEndpoints) {
+          try {
+            const ovRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': osmHeaders['User-Agent'],
+              },
+              body: `data=${encodeURIComponent(ql)}`,
+              signal: AbortSignal.timeout(7500),
+            });
+            if (!ovRes.ok) continue;
+            const ovData = (await ovRes.json()) as {
+              elements?: Array<{
+                type: string;
+                id: number;
+                lat?: number;
+                lon?: number;
+                center?: { lat: number; lon: number };
+                tags?: Record<string, string>;
+              }>;
+            };
+            const elements = ovData.elements || [];
+            for (const el of elements) {
+              const tags = el.tags || {};
+              const name = (tags.name || '').trim();
+              if (!name) continue;
+              const pLat = el.lat ?? el.center?.lat ?? null;
+              const pLng = el.lon ?? el.center?.lon ?? null;
+              const keyId = `osm-${el.type}-${el.id}`;
+              if (seenOsmIds.has(keyId)) continue;
+              seenOsmIds.add(keyId);
+
+              const bucket = classifyOsmTags(tags);
+              if (!bucketsToSearch.includes(bucket) && bucketsToSearch.length === 1) {
+                continue;
+              }
+              const addrParts = [
+                [tags['addr:street'], tags['addr:housenumber']].filter(Boolean).join(' '),
+                tags['addr:suburb'] || tags['addr:city'] || '',
+              ].filter(Boolean);
+
+              osmPlaces.push({
+                id: keyId,
+                name,
+                storeType: bucket,
+                storeTypeLabel: STORE_LABELS_BY_LANG[lang][bucket],
+                address: addrParts.join(', ') || osmCity || '',
+                lat: pLat,
+                lng: pLng,
+                distanceMeters:
+                  osmCenter && pLat !== null && pLng !== null
+                    ? haversineMeters(osmCenter.lat, osmCenter.lng, pLat, pLng)
+                    : null,
+                rating: null,
+                userRatingCount: null,
+                openNow: null,
+                priceLevelLabel: null,
+                priceRange: null,
+                googleMapsUri: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name} ${cityForMapsLink}`)}`,
+                osmUri: `https://www.openstreetmap.org/${el.type}/${el.id}`,
+                websiteUri: tags.website || tags['contact:website'] || null,
+              });
+            }
+            if (osmPlaces.length > 0) break;
+          } catch {
+            // Try next Overpass mirror or Nominatim fallback
+          }
+        }
+      }
+
+      // 3. Fallback to Nominatim POI search if Overpass yielded nothing
+      if (osmPlaces.length === 0) {
+        const poiKeywords: Record<StoreBucketKey, string> = {
+          restaurante: 'restaurante',
+          restobar: 'bar restobar',
+          juegos_comida: 'pool billar bowling arcade',
+          carniceria: 'carniceria',
+          panaderia: 'panaderia',
+          supermercado: 'supermercado',
+          heladeria: 'heladeria',
+        };
+
+        const searchTerms = trimmedQuery
+          ? [trimmedQuery, ...bucketsToSearch.slice(0, 2).map((b) => poiKeywords[b])]
+          : bucketsToSearch.slice(0, 3).map((b) => poiKeywords[b]);
+
+        await Promise.all(
+          searchTerms.map(async (term, idx) => {
+            try {
+              const targetBucket = bucketsToSearch[idx] || bucketsToSearch[0] || 'restaurante';
+              const q = `${term} ${cityForMapsLink}`;
+              const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=jsonv2&addressdetails=1&limit=6${viewboxParam}`;
+              const r = await fetch(url, {
+                headers: osmHeaders,
+                signal: AbortSignal.timeout(6500),
+              });
+              if (!r.ok) return;
+              const rows = (await r.json()) as Array<{
+                place_id: number;
+                osm_type?: string;
+                osm_id?: number;
+                lat: string;
+                lon: string;
+                name?: string;
+                display_name?: string;
+              }>;
+              for (const row of rows) {
+                const name = (row.name || row.display_name?.split(',')[0] || '').trim();
+                if (!name) continue;
+                const id = `nom-${row.place_id}`;
+                if (seenOsmIds.has(id)) continue;
+                seenOsmIds.add(id);
+
+                const pLat = Number(row.lat);
+                const pLng = Number(row.lon);
+                const validCoords = Number.isFinite(pLat) && Number.isFinite(pLng);
+
+                osmPlaces.push({
+                  id,
+                  name,
+                  storeType: targetBucket,
+                  storeTypeLabel: STORE_LABELS_BY_LANG[lang][targetBucket],
+                  address: row.display_name || osmCity || '',
+                  lat: validCoords ? pLat : null,
+                  lng: validCoords ? pLng : null,
+                  distanceMeters:
+                    osmCenter && validCoords
+                      ? haversineMeters(osmCenter.lat, osmCenter.lng, pLat, pLng)
+                      : null,
+                  rating: null,
+                  userRatingCount: null,
+                  openNow: null,
+                  priceLevelLabel: null,
+                  priceRange: null,
+                  googleMapsUri: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name} ${cityForMapsLink}`)}`,
+                  osmUri:
+                    row.osm_type && row.osm_id
+                      ? `https://www.openstreetmap.org/${row.osm_type}/${row.osm_id}`
+                      : null,
+                  websiteUri: null,
+                });
+              }
+            } catch {
+              // Ignore single Nominatim query error
+            }
+          })
+        );
+      }
+
+      const sorted = sortNormalizedPlaces(osmPlaces);
+      const filtered = osmCenter
+        ? sorted.filter((p) => p.distanceMeters === null || p.distanceMeters <= 85000)
+        : sorted;
+      const finalList = (filtered.length > 0 ? filtered : sorted).slice(0, 18);
+
+      return {
+        city: osmCity || errMsgs.defaultArea,
+        center: osmCenter,
+        places: finalList,
+      };
+    };
+
+    const mapsKey = getMapsApiKey();
+    let googleQuotaExceeded = false;
+
+    if (mapsKey) {
+      try {
+        // Reverse or forward geocode to identify city & center coordinates (prioritizing Argentina unless another country is specified)
+        const geocodeUrl = hasCoords
+          ? `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`
+          : `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityBias.cityForGeocode)}${cityBias.prioritizeArgentina ? '&region=ar' : ''}&language=${encodeURIComponent(mapsLang)}&key=${encodeURIComponent(mapsKey)}`;
+
+        const geoRes = await fetch(geocodeUrl, { signal: AbortSignal.timeout(7000) });
+        if (geoRes.status === 429) {
+          googleQuotaExceeded = true;
+        } else if (geoRes.ok) {
+          const geoData = (await geoRes.json()) as {
+            status?: string;
+            results?: Array<{
+              geometry?: { location?: { lat: number; lng: number } };
+              address_components?: AddressComponentLike[];
+              formatted_address?: string;
+            }>;
+          };
+          if (geoData.status === 'OVER_QUERY_LIMIT') {
+            googleQuotaExceeded = true;
+          } else {
+            const first = geoData.results?.[0];
+            if (first) {
+              const detected = extractCityFromComponents(first.address_components);
+              if (detected) resolvedCity = detected;
+              if (!centerCoords && first.geometry?.location) {
+                centerCoords = {
+                  lat: first.geometry.location.lat,
+                  lng: first.geometry.location.lng,
+                };
+              }
+            }
+          }
+        }
+      } catch {
+        // Continue cleanly to Places Text Search or OSM fallback
+      }
+
+      if (!googleQuotaExceeded) {
+        const fieldMask = [
+          'places.id',
+          'places.displayName',
+          'places.formattedAddress',
+          'places.shortFormattedAddress',
+          'places.location',
+          'places.googleMapsUri',
+          'places.primaryType',
+          'places.primaryTypeDisplayName',
+          'places.rating',
+          'places.userRatingCount',
+          'places.currentOpeningHours.openNow',
+          'places.priceLevel',
+          'places.priceRange',
+          'places.websiteUri',
+          'places.addressComponents',
+        ].join(',');
+
+        interface RawPlace {
+          id: string;
+          displayName?: { text?: string };
+          formattedAddress?: string;
+          shortFormattedAddress?: string;
+          location?: { latitude: number; longitude: number };
+          googleMapsUri?: string;
+          primaryType?: string;
+          primaryTypeDisplayName?: { text?: string };
+          rating?: number;
+          userRatingCount?: number;
+          currentOpeningHours?: { openNow?: boolean };
+          priceLevel?: string;
+          priceRange?: {
+            startPrice?: { currencyCode?: string; units?: string };
+            endPrice?: { currencyCode?: string; units?: string };
+          };
+          websiteUri?: string;
+          addressComponents?: AddressComponentLike[];
+        }
+
+        const PRICE_LEVEL_BY_LANG: Record<LangCode, Record<string, string>> = {
+          es: {
+            PRICE_LEVEL_FREE: 'Gratis',
+            PRICE_LEVEL_INEXPENSIVE: '$ Económico',
+            PRICE_LEVEL_MODERATE: '$$ Moderado',
+            PRICE_LEVEL_EXPENSIVE: '$$$ Elevado',
+            PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+          },
+          en: {
+            PRICE_LEVEL_FREE: 'Free',
+            PRICE_LEVEL_INEXPENSIVE: '$ Inexpensive',
+            PRICE_LEVEL_MODERATE: '$$ Moderate',
+            PRICE_LEVEL_EXPENSIVE: '$$$ Expensive',
+            PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+          },
+          fr: {
+            PRICE_LEVEL_FREE: 'Gratuit',
+            PRICE_LEVEL_INEXPENSIVE: '$ Abordable',
+            PRICE_LEVEL_MODERATE: '$$ Modéré',
+            PRICE_LEVEL_EXPENSIVE: '$$$ Élevé',
+            PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
+          },
+          zh: {
+            PRICE_LEVEL_FREE: '免费',
+            PRICE_LEVEL_INEXPENSIVE: '$ 实惠',
+            PRICE_LEVEL_MODERATE: '$$ 适中',
+            PRICE_LEVEL_EXPENSIVE: '$$$ 偏高',
+            PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ 高端',
+          },
+          ru: {
+            PRICE_LEVEL_FREE: 'Бесплатно',
+            PRICE_LEVEL_INEXPENSIVE: '$ Недорого',
+            PRICE_LEVEL_MODERATE: '$$ Умеренно',
+            PRICE_LEVEL_EXPENSIVE: '$$$ Дорого',
+            PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Премиум',
+          },
+        };
+        const PRICE_LEVEL_LABELS = PRICE_LEVEL_BY_LANG[lang];
+
+        try {
+          const searchPromises = bucketsToSearch.map(async (bucket) => {
+            const meta = STORE_QUERIES[bucket];
+            const useUserQueryInPlaces =
+              Boolean(trimmedQuery) &&
+              (storeType === bucket ||
+                bucket === 'juegos_comida' ||
+                (!isGamesQuery && mode === 'salidas'));
+            const baseTopic = useUserQueryInPlaces ? `${trimmedQuery} ${meta.query}` : meta.query;
+            const locationTextForPlaces = cityBias.prioritizeArgentina
+              ? /\bargentina\b/i.test(resolvedCity)
+                ? resolvedCity
+                : `${resolvedCity || trimmedCity}, Argentina`
+              : resolvedCity || cityBias.cityForSearch;
+            const queryText =
+              !hasCoords && locationTextForPlaces
+                ? `${baseTopic} ${locationTextForPlaces}`
+                : baseTopic;
+
+            const pageSize =
+              bucketsToSearch.length === 1
+                ? 10
+                : isGamesQuery && bucket === 'juegos_comida'
+                  ? 8
+                  : 4;
+
+            const body: Record<string, unknown> = {
+              textQuery: queryText,
+              languageCode: mapsLang,
+              pageSize,
+            };
+
+            if (cityBias.prioritizeArgentina) {
+              body.regionCode = 'AR';
+            }
+
+            if (openNowOnly) {
+              body.openNow = true;
+            }
+
+            if (centerCoords) {
+              body.locationBias = {
+                circle: {
+                  center: {
+                    latitude: centerCoords.lat,
+                    longitude: centerCoords.lng,
+                  },
+                  radius: 10000.0,
+                },
+              };
+            }
+
+            const placesRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': mapsKey,
+                'X-Goog-FieldMask': fieldMask,
+                'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+              },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(8500),
+            });
+
+            const data = (await placesRes.json()) as {
+              places?: RawPlace[];
+              error?: { status?: string; message?: string };
+            };
+
+            if (placesRes.status === 429 || data.error?.status === 'RESOURCE_EXHAUSTED') {
+              throw { quotaExceeded: true, message: data.error?.message || 'Quota exceeded' };
+            }
+
+            if (!placesRes.ok) {
+              throw new Error(data.error?.message || `Places API HTTP ${placesRes.status}`);
+            }
+
+            return (data.places || []).map((place) => ({
+              bucket,
+              bucketLabel: meta.label,
+              place,
+            }));
+          });
+
+          const nested = await Promise.all(searchPromises);
+          const flat = nested.flat();
+
+          if (!resolvedCity && flat.length > 0) {
+            for (const entry of flat) {
+              const fromPlace = extractCityFromComponents(entry.place.addressComponents);
+              if (fromPlace) {
+                resolvedCity = fromPlace;
+                break;
+              }
+            }
+          }
+
+          const seenIds = new Set<string>();
+          const normalizedPlaces: NormalizedPlace[] = sortNormalizedPlaces(
+            flat
+              .filter(({ place }) => {
+                if (!place.id || seenIds.has(place.id)) return false;
+                seenIds.add(place.id);
+                return true;
+              })
+              .map(({ bucket, bucketLabel, place }) => {
+                const pLat = place.location?.latitude;
+                const pLng = place.location?.longitude;
+                const distanceMeters =
+                  centerCoords && typeof pLat === 'number' && typeof pLng === 'number'
+                    ? haversineMeters(centerCoords.lat, centerCoords.lng, pLat, pLng)
+                    : null;
+
+                if (!centerCoords && typeof pLat === 'number' && typeof pLng === 'number') {
+                  centerCoords = { lat: pLat, lng: pLng };
+                }
+
+                const startUnits = place.priceRange?.startPrice?.units
+                  ? Number(place.priceRange.startPrice.units)
+                  : null;
+                const endUnits = place.priceRange?.endPrice?.units
+                  ? Number(place.priceRange.endPrice.units)
+                  : null;
+
+                return {
+                  id: place.id,
+                  name: place.displayName?.text || errMsgs.defaultStoreName,
+                  storeType: bucket,
+                  storeTypeLabel: place.primaryTypeDisplayName?.text || bucketLabel,
+                  address: place.shortFormattedAddress || place.formattedAddress || '',
+                  lat: pLat ?? null,
+                  lng: pLng ?? null,
+                  distanceMeters,
+                  rating: place.rating ?? null,
+                  userRatingCount: place.userRatingCount ?? null,
+                  openNow: place.currentOpeningHours?.openNow ?? null,
+                  priceLevelLabel: place.priceLevel
+                    ? PRICE_LEVEL_LABELS[place.priceLevel] || null
+                    : null,
+                  priceRange:
+                    startUnits !== null || endUnits !== null
+                      ? {
+                          currencyCode:
+                            place.priceRange?.startPrice?.currencyCode ||
+                            place.priceRange?.endPrice?.currencyCode ||
+                            'ARS',
+                          startUnits: Number.isFinite(startUnits) ? startUnits : null,
+                          endUnits: Number.isFinite(endUnits) ? endUnits : null,
+                        }
+                      : null,
+                  googleMapsUri:
+                    place.googleMapsUri ||
+                    (typeof pLat === 'number' && typeof pLng === 'number'
+                      ? `https://www.google.com/maps/search/?api=1&query=${pLat},${pLng}&query_place_id=${encodeURIComponent(place.id)}`
+                      : ''),
+                  websiteUri: place.websiteUri || null,
+                };
+              })
+          );
+
+          const inRegionPlaces = centerCoords
+            ? normalizedPlaces.filter(
+                (p) => p.distanceMeters === null || p.distanceMeters <= 85000
+              )
+            : normalizedPlaces;
+          const finalPlaces = inRegionPlaces.length > 0 ? inRegionPlaces : normalizedPlaces;
+
+          if (finalPlaces.length > 0) {
+            const displayCity = resolvedCity || errMsgs.defaultArea;
+            res.json({
+              city: displayCity,
+              center: centerCoords,
+              places: finalPlaces,
+              provider: 'google',
+              fallbackMapsSearchUrl: buildGoogleMapsSearchUrl(displayCity),
+              fallbackOsmSearchUrl: buildOsmSearchUrl(displayCity),
+            });
+            return;
+          }
+        } catch (error) {
+          const errObj = error as { quotaExceeded?: boolean };
+          if (errObj?.quotaExceeded) {
+            googleQuotaExceeded = true;
+          }
+          // Fall through seamlessly to OpenStreetMap fallback
+        }
+      }
     }
 
-    const PRICE_LEVEL_BY_LANG: Record<LangCode, Record<string, string>> = {
-      es: {
-        PRICE_LEVEL_FREE: 'Gratis',
-        PRICE_LEVEL_INEXPENSIVE: '$ Económico',
-        PRICE_LEVEL_MODERATE: '$$ Moderado',
-        PRICE_LEVEL_EXPENSIVE: '$$$ Elevado',
-        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
-      },
-      en: {
-        PRICE_LEVEL_FREE: 'Free',
-        PRICE_LEVEL_INEXPENSIVE: '$ Inexpensive',
-        PRICE_LEVEL_MODERATE: '$$ Moderate',
-        PRICE_LEVEL_EXPENSIVE: '$$$ Expensive',
-        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
-      },
-      fr: {
-        PRICE_LEVEL_FREE: 'Gratuit',
-        PRICE_LEVEL_INEXPENSIVE: '$ Abordable',
-        PRICE_LEVEL_MODERATE: '$$ Modéré',
-        PRICE_LEVEL_EXPENSIVE: '$$$ Élevé',
-        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Premium',
-      },
-      zh: {
-        PRICE_LEVEL_FREE: '免费',
-        PRICE_LEVEL_INEXPENSIVE: '$ 实惠',
-        PRICE_LEVEL_MODERATE: '$$ 适中',
-        PRICE_LEVEL_EXPENSIVE: '$$$ 偏高',
-        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ 高端',
-      },
-      ru: {
-        PRICE_LEVEL_FREE: 'Бесплатно',
-        PRICE_LEVEL_INEXPENSIVE: '$ Недорого',
-        PRICE_LEVEL_MODERATE: '$$ Умеренно',
-        PRICE_LEVEL_EXPENSIVE: '$$$ Дорого',
-        PRICE_LEVEL_VERY_EXPENSIVE: '$$$$ Премиум',
-      },
-    };
-    const PRICE_LEVEL_LABELS = PRICE_LEVEL_BY_LANG[lang];
-
+    // Backup via OpenStreetMap (Nominatim + Overpass) & Direct Google Maps / OSM Search Links
     try {
-      const searchPromises = bucketsToSearch.map(async (bucket) => {
-        const meta = STORE_QUERIES[bucket];
-        const useUserQueryInPlaces =
-          Boolean(trimmedQuery) &&
-          (storeType === bucket ||
-            bucket === 'juegos_comida' ||
-            (!isGamesQuery && mode === 'salidas'));
-        const baseTopic = useUserQueryInPlaces ? `${trimmedQuery} ${meta.query}` : meta.query;
-        const locationTextForPlaces = cityBias.prioritizeArgentina
-          ? /\bargentina\b/i.test(resolvedCity)
-            ? resolvedCity
-            : `${resolvedCity || trimmedCity}, Argentina`
-          : resolvedCity || cityBias.cityForSearch;
-        const queryText =
-          !hasCoords && locationTextForPlaces
-            ? `${baseTopic} ${locationTextForPlaces}`
-            : baseTopic;
-
-        const pageSize =
-          bucketsToSearch.length === 1
-            ? 10
-            : isGamesQuery && bucket === 'juegos_comida'
-              ? 8
-              : 4;
-
-        const body: Record<string, unknown> = {
-          textQuery: queryText,
-          languageCode: mapsLang,
-          pageSize,
-        };
-
-        if (cityBias.prioritizeArgentina) {
-          body.regionCode = 'AR';
-        }
-
-        if (openNowOnly) {
-          body.openNow = true;
-        }
-
-        if (centerCoords) {
-          body.locationBias = {
-            circle: {
-              center: {
-                latitude: centerCoords.lat,
-                longitude: centerCoords.lng,
-              },
-              radius: 10000.0,
-            },
-          };
-        }
-
-        const placesRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': mapsKey,
-            'X-Goog-FieldMask': fieldMask,
-            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
-          },
-          body: JSON.stringify(body),
-        });
-
-        const data = (await placesRes.json()) as {
-          places?: RawPlace[];
-          error?: { status?: string; message?: string };
-        };
-
-        if (placesRes.status === 429 || data.error?.status === 'RESOURCE_EXHAUSTED') {
-          throw { quotaExceeded: true, message: data.error?.message || 'Quota exceeded' };
-        }
-
-        if (!placesRes.ok) {
-          throw new Error(data.error?.message || `Places API HTTP ${placesRes.status}`);
-        }
-
-        return (data.places || []).map((place) => ({
-          bucket,
-          bucketLabel: meta.label,
-          place,
-        }));
-      });
-
-      const nested = await Promise.all(searchPromises);
-      const flat = nested.flat();
-
-      // Fallback city detection from first Place addressComponents if Geocoding didn't yield one
-      if (!resolvedCity && flat.length > 0) {
-        for (const entry of flat) {
-          const fromPlace = extractCityFromComponents(entry.place.addressComponents);
-          if (fromPlace) {
-            resolvedCity = fromPlace;
-            break;
-          }
-        }
-      }
-
-      const seenIds = new Set<string>();
-      const normalizedPlaces = flat
-        .filter(({ place }) => {
-          if (!place.id || seenIds.has(place.id)) return false;
-          seenIds.add(place.id);
-          return true;
-        })
-        .map(({ bucket, bucketLabel, place }) => {
-          const pLat = place.location?.latitude;
-          const pLng = place.location?.longitude;
-          const distanceMeters =
-            centerCoords && typeof pLat === 'number' && typeof pLng === 'number'
-              ? haversineMeters(centerCoords.lat, centerCoords.lng, pLat, pLng)
-              : null;
-
-          if (!centerCoords && typeof pLat === 'number' && typeof pLng === 'number') {
-            centerCoords = { lat: pLat, lng: pLng };
-          }
-
-          const startUnits = place.priceRange?.startPrice?.units
-            ? Number(place.priceRange.startPrice.units)
-            : null;
-          const endUnits = place.priceRange?.endPrice?.units
-            ? Number(place.priceRange.endPrice.units)
-            : null;
-
-          return {
-            id: place.id,
-            name: place.displayName?.text || errMsgs.defaultStoreName,
-            storeType: bucket,
-            storeTypeLabel: place.primaryTypeDisplayName?.text || bucketLabel,
-            address: place.shortFormattedAddress || place.formattedAddress || '',
-            lat: pLat ?? null,
-            lng: pLng ?? null,
-            distanceMeters,
-            rating: place.rating ?? null,
-            userRatingCount: place.userRatingCount ?? null,
-            openNow: place.currentOpeningHours?.openNow ?? null,
-            priceLevelLabel: place.priceLevel ? PRICE_LEVEL_LABELS[place.priceLevel] || null : null,
-            priceRange:
-              startUnits !== null || endUnits !== null
-                ? {
-                    currencyCode:
-                      place.priceRange?.startPrice?.currencyCode ||
-                      place.priceRange?.endPrice?.currencyCode ||
-                      'ARS',
-                    startUnits: Number.isFinite(startUnits) ? startUnits : null,
-                    endUnits: Number.isFinite(endUnits) ? endUnits : null,
-                  }
-                : null,
-            googleMapsUri:
-              place.googleMapsUri ||
-              (typeof pLat === 'number' && typeof pLng === 'number'
-                ? `https://www.google.com/maps/search/?api=1&query=${pLat},${pLng}&query_place_id=${encodeURIComponent(place.id)}`
-                : ''),
-            websiteUri: place.websiteUri || null,
-          };
-        })
-        .sort((a, b) => {
-          if (trimmedQuery) {
-            const tokens = trimmedQuery
-              .toLowerCase()
-              .split(/\s+/)
-              .filter((w) => w.length >= 3);
-            const scorePlace = (item: { name: string; storeType: string; storeTypeLabel: string }) => {
-              const hay = `${item.name} ${item.storeTypeLabel}`.toLowerCase();
-              let score = 0;
-              for (const tok of tokens) {
-                if (hay.includes(tok)) score += 3;
-              }
-              if (isGamesQuery && item.storeType === 'juegos_comida') score += 2;
-              return score;
-            };
-            const diff = scorePlace(b) - scorePlace(a);
-            if (diff !== 0) return diff;
-          }
-          if (a.distanceMeters !== null && b.distanceMeters !== null) {
-            return a.distanceMeters - b.distanceMeters;
-          }
-          return (b.rating || 0) - (a.rating || 0);
-        });
-
-      const inRegionPlaces = centerCoords
-        ? normalizedPlaces.filter(
-            (p) => p.distanceMeters === null || p.distanceMeters <= 85000
-          )
-        : normalizedPlaces;
-      const finalPlaces = inRegionPlaces.length > 0 ? inRegionPlaces : normalizedPlaces;
-
+      const osmResult = await searchWithOpenStreetMap();
+      const displayCity = osmResult.city || resolvedCity || trimmedCity || errMsgs.defaultArea;
       res.json({
-        city: resolvedCity || errMsgs.defaultArea,
-        center: centerCoords,
-        places: finalPlaces,
+        city: displayCity,
+        center: osmResult.center || centerCoords,
+        places: osmResult.places,
+        provider: osmResult.places.length > 0 ? 'osm' : 'fallback_links',
+        fallbackMapsSearchUrl: buildGoogleMapsSearchUrl(displayCity),
+        fallbackOsmSearchUrl: buildOsmSearchUrl(displayCity),
+        ...(googleQuotaExceeded ? { quotaExceeded: true } : {}),
       });
-    } catch (error) {
-      const errObj = error as { quotaExceeded?: boolean; message?: string };
-      if (errObj?.quotaExceeded) {
-        res.status(429).json({
-          error: errMsgs.mapsQuotaExceeded,
-          quotaExceeded: true,
-        });
-        return;
-      }
-      res.status(500).json({
-        error: errObj?.message || errMsgs.nearbyFallbackError,
+    } catch {
+      const displayCity = resolvedCity || trimmedCity || errMsgs.defaultArea;
+      res.json({
+        city: displayCity,
+        center: centerCoords,
+        places: [],
+        provider: 'fallback_links',
+        fallbackMapsSearchUrl: buildGoogleMapsSearchUrl(displayCity),
+        fallbackOsmSearchUrl: buildOsmSearchUrl(displayCity),
+        ...(googleQuotaExceeded ? { quotaExceeded: true } : {}),
       });
     }
   });

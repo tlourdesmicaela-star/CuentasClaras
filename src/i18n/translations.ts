@@ -462,6 +462,15 @@ export const TRANSLATIONS = {
       mapsPromoTipBody:
         'Tocá «Ver en Maps» en cualquiera de los locales listados para ver fotos del menú, happy hour, descuentos bancarios y precios de pool/juegos, y cargá el monto en la calculadora para dividirlo.',
       searchPromosInMapsBtn: 'Buscar promociones en Google Maps',
+      osmBadge: 'Respaldo OpenStreetMap · Nominatim',
+      openSearchInMaps: 'Abrir búsqueda en Google Maps',
+      openInOsm: 'Explorar en OpenStreetMap',
+      fallbackPlacesTitle: 'Buscá locales directamente en Google Maps o OpenStreetMap',
+      fallbackPlacesBody:
+        'No se pudo obtener el listado automático en este momento, pero podés abrir la búsqueda exacta de tu ciudad en Google Maps o OpenStreetMap para ver locales, cartas y promos.',
+      noFilterMatchesBody:
+        'No encontramos coincidencias exactas con esos filtros en el listado automático. Podés abrir la búsqueda directa en Google Maps o OpenStreetMap para ver todas las opciones.',
+      osmAttribution: 'Respaldo de geocodificación y lugares vía OpenStreetMap / Nominatim.',
     },
   },
   en: {
@@ -912,6 +921,15 @@ export const TRANSLATIONS = {
       mapsPromoTipBody:
         'Tap "View on Maps" on any listed venue to inspect menu photos, happy hour deals, bank promos, and pool/game rates, then enter the amount in the calculator to split.',
       searchPromosInMapsBtn: 'Search promotions on Google Maps',
+      osmBadge: 'OpenStreetMap · Nominatim backup',
+      openSearchInMaps: 'Open search in Google Maps',
+      openInOsm: 'Explore on OpenStreetMap',
+      fallbackPlacesTitle: 'Search venues directly on Google Maps or OpenStreetMap',
+      fallbackPlacesBody:
+        'We could not fetch the automatic venue list right now, but you can open the exact search for your city on Google Maps or OpenStreetMap to view menus and deals.',
+      noFilterMatchesBody:
+        'No exact matches were found with those filters in the automatic list. Open the direct search on Google Maps or OpenStreetMap to explore all nearby spots.',
+      osmAttribution: 'Fallback geocoding and place data via OpenStreetMap / Nominatim.',
     },
   },
   fr: {
@@ -1362,6 +1380,15 @@ export const TRANSLATIONS = {
       mapsPromoTipBody:
         'Touchez « Voir sur Maps » sur un lieu pour consulter le menu, l’happy hour et les tarifs de billard/jeux, puis saisissez le montant dans la calculatrice.',
       searchPromosInMapsBtn: 'Chercher des promos sur Google Maps',
+      osmBadge: 'Secours OpenStreetMap · Nominatim',
+      openSearchInMaps: 'Ouvrir la recherche sur Google Maps',
+      openInOsm: 'Explorer sur OpenStreetMap',
+      fallbackPlacesTitle: 'Recherchez directement sur Google Maps ou OpenStreetMap',
+      fallbackPlacesBody:
+        'La liste automatique n’a pas pu être récupérée pour le moment, mais vous pouvez ouvrir la recherche exacte de votre ville sur Google Maps ou OpenStreetMap.',
+      noFilterMatchesBody:
+        'Aucun résultat exact avec ces filtres dans la liste automatique. Ouvrez la recherche directe sur Google Maps ou OpenStreetMap pour tout afficher.',
+      osmAttribution: 'Données de géocodage et lieux de secours via OpenStreetMap / Nominatim.',
     },
   },
   zh: {
@@ -1802,6 +1829,15 @@ export const TRANSLATIONS = {
       mapsPromoTipBody:
         '点击任意地点卡片中的“在地图中查看”，即可查看菜单图片、优惠活动及台球/游戏收费标准，并在下方计算器中输入金额分摊。',
       searchPromosInMapsBtn: '在 Google 地图中搜索优惠',
+      osmBadge: 'OpenStreetMap · Nominatim 备用数据源',
+      openSearchInMaps: '在 Google 地图中打开搜索',
+      openInOsm: '在 OpenStreetMap 中浏览',
+      fallbackPlacesTitle: '直接在 Google 地图或 OpenStreetMap 中搜索',
+      fallbackPlacesBody:
+        '暂时无法自动加载附近商家列表，但您可以直接打开所在城市的 Google 地图或 OpenStreetMap 精准搜索来查看菜单和优惠。',
+      noFilterMatchesBody:
+        '当前筛选条件下未找到匹配商家。您可以直接打开 Google 地图或 OpenStreetMap 查看该城市的全部场所。',
+      osmAttribution: '备用地理编码与地点数据由 OpenStreetMap / Nominatim 提供。',
     },
   },
   ru: {
@@ -2250,6 +2286,15 @@ export const TRANSLATIONS = {
       mapsPromoTipBody:
         'Нажмите «На карте» у любого заведения, чтобы посмотреть меню, скидки и цены на бильярд или игры, а затем введите сумму в калькулятор для расчёта.',
       searchPromosInMapsBtn: 'Искать акции в Google Картах',
+      osmBadge: 'Резерв OpenStreetMap · Nominatim',
+      openSearchInMaps: 'Открыть поиск в Google Картах',
+      openInOsm: 'Открыть в OpenStreetMap',
+      fallbackPlacesTitle: 'Ищите заведения напрямую в Google Картах или OpenStreetMap',
+      fallbackPlacesBody:
+        'Сейчас не удалось автоматически загрузить список мест, но вы можете открыть точный поиск по вашему городу в Google Картах или OpenStreetMap.',
+      noFilterMatchesBody:
+        'По этим фильтрам точных совпадений не найдено. Откройте прямой поиск в Google Картах или OpenStreetMap, чтобы увидеть все варианты.',
+      osmAttribution: 'Резервные геоданные и места предоставлены OpenStreetMap / Nominatim.',
     },
   },
 } as const;

@@ -64,7 +64,60 @@ interface NearbyPlace {
     endUnits: number | null;
   } | null;
   googleMapsUri: string;
+  osmUri?: string | null;
   websiteUri: string | null;
+}
+
+function buildClientMapsSearchUrl(
+  city: string,
+  mode: SearchMode,
+  storeType: OfferStoreType,
+  customQuery: string
+): string {
+  const trimmed = customQuery.trim();
+  const topicParts: string[] = [];
+  if (trimmed) topicParts.push(trimmed);
+  if (storeType !== 'all') {
+    const labelMap: Record<StoreBucketType, string> = {
+      restaurante: 'restaurantes',
+      restobar: 'restobares',
+      juegos_comida: 'pool billar arcade bowling',
+      carniceria: 'carnicerias',
+      panaderia: 'panaderias',
+      supermercado: 'supermercados',
+      heladeria: 'heladerias',
+    };
+    topicParts.push(labelMap[storeType]);
+  } else if (!trimmed) {
+    topicParts.push(
+      mode === 'salidas'
+        ? 'restaurantes restobares pool juegos'
+        : 'carnicerias panaderias supermercados heladerias'
+    );
+  }
+  const cleanCity = city.trim() || 'Argentina';
+  const hasForeignCountry =
+    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|united states|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
+      cleanCity
+    ) || /,\s*(tx|ca|ny|fl|il|az|wa|nv|co|ma|ga|nc|oh|pa|mi)\b/i.test(cleanCity);
+  const loc =
+    !hasForeignCountry && !/\bargentina\b/i.test(cleanCity)
+      ? `${cleanCity}, Argentina`
+      : cleanCity;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${topicParts.join(' ')} ${loc}`.trim())}`;
+}
+
+function buildClientOsmSearchUrl(city: string): string {
+  const cleanCity = city.trim() || 'Argentina';
+  const hasForeignCountry =
+    /\b(españa|spain|chile|uruguay|paraguay|bolivia|brasil|brazil|colombia|peru|perú|mexico|méxico|ecuador|venezuela|estados unidos|usa|united states|canada|canadá|francia|france|italia|italy|alemania|germany|portugal|reino unido|uk|england|china|rusia|russia|japon|japan|australia)\b/i.test(
+      cleanCity
+    );
+  const loc =
+    !hasForeignCountry && !/\bargentina\b/i.test(cleanCity)
+      ? `${cleanCity}, Argentina`
+      : cleanCity;
+  return `https://www.openstreetmap.org/search?query=${encodeURIComponent(loc)}`;
 }
 
 interface VenueEnrichment {
@@ -376,11 +429,15 @@ export function OffersFinder({
   const [openNowOnly, setOpenNowOnly] = useState(false);
 
   // Search Results
+  const [hasSearched, setHasSearched] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [resolvedCity, setResolvedCity] = useState<string>('');
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [places, setPlaces] = useState<NearbyPlace[]>([]);
+  const [placesProvider, setPlacesProvider] = useState<'google' | 'osm' | 'fallback_links' | null>(null);
+  const [fallbackMapsUrl, setFallbackMapsUrl] = useState<string>('');
+  const [fallbackOsmUrl, setFallbackOsmUrl] = useState<string>('');
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [offersMarkdown, setOffersMarkdown] = useState<string>('');
   const [venueEnrichments, setVenueEnrichments] = useState<VenueEnrichment[]>([]);
@@ -424,9 +481,20 @@ export function OffersFinder({
       return;
     }
 
+    const clientMapsFallback = buildClientMapsSearchUrl(
+      trimmedCity,
+      searchMode,
+      storeType,
+      customQuery
+    );
+    const clientOsmFallback = buildClientOsmSearchUrl(trimmedCity);
+
+    setHasSearched(true);
     setIsSearching(true);
     setSearchError(null);
     setOffersUnavailable(false);
+    setFallbackMapsUrl(clientMapsFallback);
+    setFallbackOsmUrl(clientOsmFallback);
 
     let detectedCity = trimmedCity;
     let fetchedPlaces: NearbyPlace[] = [];
@@ -446,24 +514,46 @@ export function OffersFinder({
         }),
       });
 
-      const storesData = (await storesRes.json()) as {
+      const rawStoresText = await storesRes.text();
+      let storesData: {
         city?: string;
         center?: { lat: number; lng: number } | null;
         places?: NearbyPlace[];
+        provider?: 'google' | 'osm' | 'fallback_links';
+        fallbackMapsSearchUrl?: string;
+        fallbackOsmSearchUrl?: string;
         error?: string;
         quotaExceeded?: boolean;
-      };
+      } | null = null;
 
-      if (storesRes.status === 429 || storesData.quotaExceeded) {
+      if (rawStoresText) {
+        try {
+          storesData = JSON.parse(rawStoresText);
+        } catch {
+          storesData = null;
+        }
+      }
+
+      if (storesRes.status === 429 || storesData?.quotaExceeded) {
         window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
       }
 
-      if (!storesRes.ok) {
-        setSearchError(storesData.error || t.offers.nearbyError);
+      if (!storesRes.ok || !storesData) {
         setPlaces([]);
+        setPlacesProvider('fallback_links');
+        setResolvedCity(trimmedCity);
       } else {
         fetchedPlaces = storesData.places || [];
         setPlaces(fetchedPlaces);
+        setPlacesProvider(
+          storesData.provider || (fetchedPlaces.length > 0 ? 'google' : 'fallback_links')
+        );
+        if (storesData.fallbackMapsSearchUrl) {
+          setFallbackMapsUrl(storesData.fallbackMapsSearchUrl);
+        }
+        if (storesData.fallbackOsmSearchUrl) {
+          setFallbackOsmUrl(storesData.fallbackOsmSearchUrl);
+        }
         const firstId = fetchedPlaces[0]?.id || null;
         setSelectedPlaceId(firstId);
         if (firstId) {
@@ -478,7 +568,10 @@ export function OffersFinder({
         }
       }
     } catch {
-      setSearchError(t.offers.nearbyNetError);
+      // Never show a bare connection error without an actionable alternative
+      setPlaces([]);
+      setPlacesProvider('fallback_links');
+      setResolvedCity((prev) => prev || trimmedCity);
     }
 
     // Grounded web search for food offers + game prices (pool, bowling, arcade)
@@ -872,82 +965,123 @@ export function OffersFinder({
       </section>
 
       {/* Main Results Grid: Map + Listed Venue Options (left) and City Offers Summary (right) */}
-      {(places.length > 0 || offersMarkdown || isSearching) && (
+      {(hasSearched || places.length > 0 || offersMarkdown || offersUnavailable || isSearching) && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Interactive Map & Enlisted Options with Calculators */}
           <div className="lg:col-span-7 space-y-4">
-            {mapsApiKey && effectiveMapCenter && (
+            {effectiveMapCenter && (
               <section className="bg-white dark:bg-slate-900/85 border border-slate-200 dark:border-slate-800/90 rounded-2xl p-3.5 sm:p-4 space-y-3">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-display font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                     <Navigation className="w-4 h-4 text-emerald-600 dark:text-violet-400" aria-hidden="true" />
                     <span>{t.offers.mapIn} {resolvedCity || manualCity || t.offers.yourArea}</span>
                   </h3>
-                  <span className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                    {places.length} {places.length === 1 ? t.offers.optionSingular : t.offers.optionPlural}
-                  </span>
+                  <div className="flex items-center gap-2.5">
+                    {placesProvider === 'osm' && (
+                      <span className="text-[11px] font-medium text-emerald-700 dark:text-violet-300">
+                        {t.offers.osmBadge}
+                      </span>
+                    )}
+                    <span className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                      {places.length} {places.length === 1 ? t.offers.optionSingular : t.offers.optionPlural}
+                    </span>
+                  </div>
                 </div>
 
-                <div className="h-[320px] sm:h-[360px] w-full rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800">
-                  <APIProvider apiKey={mapsApiKey} libraries={['marker']} language={mapsLanguage}>
-                    <GoogleMap
-                      mapId="DEMO_MAP_ID"
-                      defaultCenter={effectiveMapCenter}
-                      defaultZoom={14}
-                      gestureHandling="greedy"
-                      colorScheme={theme === 'dark' ? 'DARK' : 'LIGHT'}
-                      internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-                      className="w-full h-full"
-                    >
-                      <MapCameraSync center={effectiveMapCenter} />
+                {mapsApiKey ? (
+                  <div className="h-[320px] sm:h-[360px] w-full rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800">
+                    <APIProvider apiKey={mapsApiKey} libraries={['marker']} language={mapsLanguage}>
+                      <GoogleMap
+                        mapId="DEMO_MAP_ID"
+                        defaultCenter={effectiveMapCenter}
+                        defaultZoom={14}
+                        gestureHandling="greedy"
+                        colorScheme={theme === 'dark' ? 'DARK' : 'LIGHT'}
+                        internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+                        className="w-full h-full"
+                      >
+                        <MapCameraSync center={effectiveMapCenter} />
 
-                      {places.map((place) => (
-                        <StoreMarker
-                          key={place.id}
-                          place={place}
-                          isSelected={selectedPlaceId === place.id}
-                          onSelect={(p) => {
-                            setSelectedPlaceId(p.id);
-                            setExpandedCalcIds((prev) => ({ ...prev, [p.id]: true }));
-                          }}
-                          onClose={() => setSelectedPlaceId(null)}
-                        />
-                      ))}
-                    </GoogleMap>
-                  </APIProvider>
-                </div>
+                        {places.map((place) => (
+                          <StoreMarker
+                            key={place.id}
+                            place={place}
+                            isSelected={selectedPlaceId === place.id}
+                            onSelect={(p) => {
+                              setSelectedPlaceId(p.id);
+                              setExpandedCalcIds((prev) => ({ ...prev, [p.id]: true }));
+                            }}
+                            onClose={() => setSelectedPlaceId(null)}
+                          />
+                        ))}
+                      </GoogleMap>
+                    </APIProvider>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    <div className="h-[280px] sm:h-[320px] w-full rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950">
+                      <iframe
+                        title={`${t.offers.mapIn} ${resolvedCity || manualCity || t.offers.yourArea}`}
+                        src={`https://www.openstreetmap.org/export/embed.html?bbox=${effectiveMapCenter.lng - 0.03},${effectiveMapCenter.lat - 0.02},${effectiveMapCenter.lng + 0.03},${effectiveMapCenter.lat + 0.02}&layer=mapnik&marker=${effectiveMapCenter.lat},${effectiveMapCenter.lng}`}
+                        className="w-full h-full border-0"
+                        loading="lazy"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <a
+                        href={
+                          fallbackMapsUrl ||
+                          buildClientMapsSearchUrl(
+                            resolvedCity || manualCity,
+                            searchMode,
+                            storeType,
+                            customQuery
+                          )
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-violet-300 hover:underline"
+                      >
+                        <span>{t.offers.openSearchInMaps}</span>
+                        <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                      </a>
+                    </div>
+                  </div>
+                )}
 
                 {/* Color Legend */}
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-600 dark:text-slate-400 px-0.5">
-                  {searchMode === 'salidas' ? (
-                    <>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#f97316]" /> {t.offers.legendRestaurant}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#ec4899]" /> {t.offers.legendRestobar}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#0ea5e9]" /> {t.offers.legendGames}
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#e11d48]" /> {t.offers.legendButcher}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#d97706]" /> {t.offers.legendBakery}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#059669]" /> {t.offers.legendMarket}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#7c3aed]" /> {t.offers.legendIceCream}
-                      </span>
-                    </>
-                  )}
-                </div>
+                {mapsApiKey && (
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-600 dark:text-slate-400 px-0.5">
+                    {searchMode === 'salidas' ? (
+                      <>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#f97316]" /> {t.offers.legendRestaurant}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#ec4899]" /> {t.offers.legendRestobar}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#0ea5e9]" /> {t.offers.legendGames}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#e11d48]" /> {t.offers.legendButcher}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#d97706]" /> {t.offers.legendBakery}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#059669]" /> {t.offers.legendMarket}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#7c3aed]" /> {t.offers.legendIceCream}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
               </section>
             )}
 
@@ -964,18 +1098,77 @@ export function OffersFinder({
                     {t.offers.enlistedTitle} {resolvedCity || manualCity || t.offers.yourCity}
                   </span>
                 </h3>
-                <span className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
-                  <Users className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>{t.offers.activeGroupLabel} {activeGroupCount} {t.offers.membersLabel}</span>
-                </span>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {placesProvider === 'osm' && places.length > 0 && !effectiveMapCenter && (
+                    <span className="text-[11px] font-medium text-emerald-700 dark:text-violet-300">
+                      {t.offers.osmBadge}
+                    </span>
+                  )}
+                  <span className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                    <Users className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>{t.offers.activeGroupLabel} {activeGroupCount} {t.offers.membersLabel}</span>
+                  </span>
+                </div>
               </div>
 
               {places.length === 0 ? (
-                <p className="text-xs text-slate-500 dark:text-slate-400 py-4 text-center">
-                  {isSearching
-                    ? t.offers.loadingPlaces
-                    : t.offers.noPlacesFound}
-                </p>
+                isSearching ? (
+                  <p className="text-xs text-slate-500 dark:text-slate-400 py-4 text-center">
+                    {t.offers.loadingPlaces}
+                  </p>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-slate-950/60 p-4 space-y-3">
+                    <div className="flex items-start gap-2.5">
+                      <MapPin
+                        className="w-4 h-4 text-emerald-600 dark:text-violet-400 shrink-0 mt-0.5"
+                        aria-hidden="true"
+                      />
+                      <div className="space-y-1 min-w-0">
+                        <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {t.offers.fallbackPlacesTitle}
+                        </p>
+                        <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                          {placesProvider === 'fallback_links'
+                            ? t.offers.fallbackPlacesBody
+                            : t.offers.noFilterMatchesBody}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <a
+                        href={
+                          fallbackMapsUrl ||
+                          buildClientMapsSearchUrl(
+                            resolvedCity || manualCity,
+                            searchMode,
+                            storeType,
+                            customQuery
+                          )
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 min-h-[38px] px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-violet-600 text-white text-xs font-semibold hover:bg-slate-800 dark:hover:bg-violet-500 transition-colors"
+                      >
+                        <span>{t.offers.openSearchInMaps}</span>
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      </a>
+
+                      <a
+                        href={
+                          fallbackOsmUrl ||
+                          buildClientOsmSearchUrl(resolvedCity || manualCity)
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 min-h-[38px] px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-emerald-400 dark:hover:border-violet-400 transition-colors"
+                      >
+                        <span>{t.offers.openInOsm}</span>
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      </a>
+                    </div>
+                  </div>
+                )
               ) : (
                 <div className="space-y-3.5">
                   {places.map((place, index) => {
@@ -1444,6 +1637,16 @@ export function OffersFinder({
                                 <ExternalLink className="w-3 h-3" aria-hidden="true" />
                               </a>
                             )}
+                            {place.osmUri && (
+                              <a
+                                href={place.osmUri}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 dark:text-slate-400 hover:underline"
+                              >
+                                <span>OSM</span>
+                              </a>
+                            )}
                             {place.websiteUri && (
                               <a
                                 href={place.websiteUri}
@@ -1560,27 +1763,32 @@ export function OffersFinder({
                 </div>
               )}
 
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800/80 leading-relaxed">
-                {t.offers.mapsAttribution1}{' '}
-                <a
-                  href="https://maps.google.com/help/terms_maps/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline hover:text-slate-700 dark:hover:text-slate-200"
-                >
-                  {t.offers.mapsTermsLink}
-                </a>{' '}
-                {t.offers.mapsAttribution2}{' '}
-                <a
-                  href="https://policies.google.com/privacy"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline hover:text-slate-700 dark:hover:text-slate-200"
-                >
-                  {t.offers.privacyLink}
-                </a>
-                .
-              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800/80 leading-relaxed space-y-1">
+                <p>
+                  {t.offers.mapsAttribution1}{' '}
+                  <a
+                    href="https://maps.google.com/help/terms_maps/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-slate-700 dark:hover:text-slate-200"
+                  >
+                    {t.offers.mapsTermsLink}
+                  </a>{' '}
+                  {t.offers.mapsAttribution2}{' '}
+                  <a
+                    href="https://policies.google.com/privacy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-slate-700 dark:hover:text-slate-200"
+                  >
+                    {t.offers.privacyLink}
+                  </a>
+                  .
+                </p>
+                {placesProvider === 'osm' && (
+                  <p>{t.offers.osmAttribution}</p>
+                )}
+              </div>
             </section>
           </div>
         </div>
